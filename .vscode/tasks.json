@@ -1,0 +1,31 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "npm",
+			"script": "compile",
+			"path": "client",
+			"group": "build",
+			"problemMatcher": [
+				"$tsc"
+			],
+			"label": "npm: compile - client",
+			"detail": "compile the client"
+		},
+		{
+			"type": "shell",
+			"label": "cargo: build - server",
+			"command": "cargo build",
+			"options": {
+				"cwd": "${workspaceFolder}/server"
+			},
+			"group": "build",
+			"problemMatcher": [
+				"$rustc"
+			],
+            "presentation": {
+                "reveal": "silent"
+            }
+		}
+	]
+}
