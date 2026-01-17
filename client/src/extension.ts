@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { workspace, ExtensionContext, window, lm, LanguageModelChatMessage, CancellationTokenSource } from 'vscode';
+import { workspace, ExtensionContext, window, lm, LanguageModelChatMessage, CancellationTokenSource, chat } from 'vscode';
 import {
   LanguageClient,
   LanguageClientOptions,
@@ -36,8 +36,9 @@ export async function activate(context: ExtensionContext) {
 
   // Options to control the language client
   const clientOptions: LanguageClientOptions = {
-    // Register the server for plain text documents
-    documentSelector: [{ scheme: 'file', language: 'plaintext' }],
+    // Register the server for all documents to ensure it activates immediately for testing
+    documentSelector: [{ scheme: 'file', language: '*' }],
+    outputChannel: outputChannel, // <--- Use the same output channel for the server logs
     synchronize: {
       // Notify the server about file changes to '.clientrc files contained in the workspace
       fileEvents: workspace.createFileSystemWatcher('**/.clientrc')
@@ -57,9 +58,9 @@ export async function activate(context: ExtensionContext) {
   await client.start();
   outputChannel.appendLine(`[LSP Agent] Client started.`);
 
-  client.onRequest("custom/hello", async (params: any) => {
-    outputChannel.appendLine(`[LSP Agent] Received custom/hello request: ${JSON.stringify(params)}`);
-    window.showInformationMessage("Server sent: " + params.text);
+  client.onRequest("custom/inference", async (params: any) => {
+    outputChannel.appendLine(`[LSP Agent] Received custom/inference request: ${JSON.stringify(params)}`);
+    window.showInformationMessage("Agent Request: " + params.request);
     try {
         const models = await lm.selectChatModels({
             vendor: 'copilot'
@@ -74,7 +75,7 @@ export async function activate(context: ExtensionContext) {
 
         outputChannel.appendLine(`[LSP Agent] Using model: ${model.name} (${model.id})`);
 
-        const messages = [LanguageModelChatMessage.User("Hello world. Please respond with a very short greeting.")];
+        const messages = [LanguageModelChatMessage.User(params.request)];
         const cancelToken = new CancellationTokenSource().token;
         
         const response = await model.sendRequest(messages, {}, cancelToken);
@@ -87,15 +88,30 @@ export async function activate(context: ExtensionContext) {
         outputChannel.appendLine(`[LSP Agent] Model response: ${fullText}`);
 
         return { 
-            response: "Inference Complete",
-            modelUsed: model.name,
-            inferenceResult: fullText
+            response: fullText
         };
     } catch (e) {
         outputChannel.appendLine(`[LSP Agent] Chat model error: ${e}`);
         return { response: "Error: " + e };
     }
   });
+
+  const chatParticipant = chat.createChatParticipant("lsp-agent.chat", async (request, context, response, token) => {
+    response.markdown("Sending request to LSP server...");
+    const userPrompt = request.prompt;
+    
+    try {
+        await client.sendRequest("workspace/executeCommand", { 
+            command: "lsp-agent.log-chat", 
+            arguments: [userPrompt] 
+        });
+        response.markdown(`\n\nRequest logged by server.`);
+    } catch (err) {
+        response.markdown(`\n\nFailed to send request: ${err}`);
+    }
+  });
+
+  context.subscriptions.push(chatParticipant);
 }
 
 export function deactivate(): Thenable<void> | undefined {

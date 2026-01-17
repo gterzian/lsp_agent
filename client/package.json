@@ -30,7 +30,15 @@
           "description": "Traces the communication between VS Code and the language server."
         }
       }
-    }
+    },
+    "chatParticipants": [
+      {
+        "id": "lsp-agent.chat",
+        "name": "web-agent",
+        "description": "Chat with the Web Agent",
+        "isSticky": true
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

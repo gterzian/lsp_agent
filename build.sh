@@ -3,6 +3,7 @@ set -e
 
 echo "=== Building Rust Server ==="
 cd server
+cargo fmt
 cargo build
 cd ..
 
