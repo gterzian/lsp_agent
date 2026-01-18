@@ -48,7 +48,10 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec!["lsp-agent.log-chat".to_string()],
+                    commands: vec![
+                        "lsp-agent.log-chat".to_string(),
+                        "lsp-agent.active-doc".to_string(),
+                    ],
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -78,29 +81,107 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
-    async fn execute_command(
-        &self,
-        params: ExecuteCommandParams,
-    ) -> Result<Option<serde_json::Value>> {
-        if let Some(arg) = params.arguments.first().and_then(|v| v.as_str()) {
-            let request_text = arg.to_string();
-            let req_id = Uuid::new_v4().to_string();
+    async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        self.client
+            .log_message(MessageType::INFO, "File opened")
+            .await;
+        let uri = params.text_document.uri.to_string();
+        let text = params.text_document.text;
 
+        self.doc_handle.with_doc_mut(|doc| {
+            let mut agent: LspAgent = hydrate(doc).unwrap();
+            agent
+                .text_documents
+                .documents
+                .insert(uri, DocumentContent { text });
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
+        });
+    }
+
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let uri = params.text_document.uri.to_string();
+
+        if let Some(change) = params.content_changes.last() {
+            let text = change.text.clone();
             self.doc_handle.with_doc_mut(|doc| {
                 let mut agent: LspAgent = hydrate(doc).unwrap();
-                agent.requests.insert(req_id.clone(), request_text);
+                agent
+                    .text_documents
+                    .documents
+                    .insert(uri, DocumentContent { text });
                 let mut tx = doc.transaction();
                 reconcile(&mut tx, &agent).unwrap();
                 tx.commit();
             });
         }
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        self.client
+            .log_message(MessageType::INFO, "File closed")
+            .await;
+        let uri = params.text_document.uri.to_string();
+
+        self.doc_handle.with_doc_mut(|doc| {
+            let mut agent: LspAgent = hydrate(doc).unwrap();
+            agent.text_documents.documents.remove(&uri);
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
+        });
+    }
+
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
         if params.command == "lsp-agent.log-chat" {
+            if let Some(arg) = params.arguments.first().and_then(|v| v.as_str()) {
+                let request_text = arg.to_string();
+                let req_id = Id {
+                    value: Uuid::new_v4().to_string(),
+                };
+
+                self.doc_handle.with_doc_mut(|doc| {
+                    let mut agent: LspAgent = hydrate(doc).unwrap();
+                    agent.requests.insert(
+                        req_id.clone(),
+                        ChatRequest {
+                            content: request_text,
+                        },
+                    );
+                    let mut tx = doc.transaction();
+                    reconcile(&mut tx, &agent).unwrap();
+                    tx.commit();
+                });
+            }
+
             self.client
                 .log_message(
                     MessageType::INFO,
                     format!("Chat Request Received: {:?}", params.arguments),
                 )
                 .await;
+        } else if params.command == "lsp-agent.active-doc" {
+            if let Some(uri) = params.arguments.first().and_then(|v| v.as_str()) {
+                let uri_string = uri.to_string();
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!("Active doc changed to: {}", uri_string),
+                    )
+                    .await;
+
+                self.doc_handle.with_doc_mut(|doc| {
+                    let mut agent: LspAgent = hydrate(doc).unwrap();
+                    agent.text_documents.active_document = Some(Uri { value: uri_string });
+                    let mut tx = doc.transaction();
+                    reconcile(&mut tx, &agent).unwrap();
+                    tx.commit();
+                });
+            }
         }
         Ok(None)
     }
@@ -110,10 +191,71 @@ const PEER1_PORT: u16 = 2341;
 const PEER2_PORT: u16 = 2342;
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
+struct ChatRequest {
+    content: String,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
+struct ChatResponse {
+    content: String,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
+struct DocumentContent {
+    text: String,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default, Hash, Eq)]
+struct Id {
+    value: String,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
+struct Uri {
+    value: String,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
+struct DocumentManager {
+    documents: HashMap<String, DocumentContent>,
+    active_document: Option<Uri>,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
 struct LspAgent {
-    requests: HashMap<String, String>,
-    responses: HashMap<String, String>,
+    requests: HashMap<Id, ChatRequest>,
+    responses: HashMap<Id, ChatResponse>,
+    text_documents: DocumentManager,
+    webviews: DocumentManager,
     should_exit: bool,
+}
+
+impl std::fmt::Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.value)
+    }
+}
+
+impl AsRef<str> for Id {
+    fn as_ref(&self) -> &str {
+        &self.value
+    }
+}
+
+impl From<String> for Id {
+    fn from(s: String) -> Self {
+        Id { value: s }
+    }
+}
+
+impl std::str::FromStr for Id {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(Id {
+            value: s.to_string(),
+        })
+    }
 }
 
 /*
@@ -225,8 +367,8 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
                         agent
                             .requests
                             .iter()
-                            .find(|(id, _)| !agent.responses.contains_key(id.as_str()))
-                            .map(|(id, req)| (id.clone(), req.clone())),
+                            .find(|(id, _)| !agent.responses.contains_key(*id))
+                            .map(|(id, req)| (id.clone(), req.content.clone())),
                     ),
                     Err(e) => {
                         eprintln!("Error in Agent Loop: {:?}", e);
@@ -235,7 +377,12 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
                 });
 
             if should_exit {
-                let _ = main_task_repo_handle.stop();
+                Handle::current()
+                    .spawn_blocking(|| {
+                        main_task_repo_handle.stop().unwrap();
+                    })
+                    .await
+                    .unwrap();
                 break;
             }
 
@@ -259,7 +406,12 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
                 main_task_doc_handle.with_doc_mut(|doc| {
                     let mut agent: LspAgent = hydrate(doc).unwrap();
                     if !agent.responses.contains_key(&req_id) {
-                        agent.responses.insert(req_id, response_str.clone());
+                        agent.responses.insert(
+                            req_id,
+                            ChatResponse {
+                                content: response_str.clone(),
+                            },
+                        );
                         let mut tx = doc.transaction();
                         reconcile(&mut tx, &agent).unwrap();
                         tx.commit();
@@ -307,13 +459,18 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
         // Wait for sync (simple hacky wait)
         sleep(Duration::from_millis(2000)).await;
 
-        let req_id = Uuid::new_v4().to_string();
+        let req_id = Id {
+            value: Uuid::new_v4().to_string(),
+        };
 
         doc_handle_peer2.with_doc_mut(|doc| {
             let mut agent: LspAgent = hydrate(doc).unwrap();
-            agent
-                .requests
-                .insert(req_id.clone(), "Hello World".to_string());
+            agent.requests.insert(
+                req_id.clone(),
+                ChatRequest {
+                    content: "Hello World".to_string(),
+                },
+            );
             let mut tx = doc.transaction();
             reconcile(&mut tx, &agent).unwrap();
             tx.commit();

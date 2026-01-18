@@ -58,6 +58,31 @@ export async function activate(context: ExtensionContext) {
   await client.start();
   outputChannel.appendLine(`[LSP Agent] Client started.`);
 
+  // Listen for active editor changes
+  window.onDidChangeActiveTextEditor(editor => {
+    if (editor && editor.document) {
+        const uri = editor.document.uri.toString();
+        outputChannel.appendLine(`[LSP Agent] Active editor changed: ${uri}`);
+        client.sendRequest("workspace/executeCommand", {
+            command: "lsp-agent.active-doc",
+            arguments: [uri]
+        }).catch(err => {
+            outputChannel.appendLine(`[LSP Agent] Failed to update active doc: ${err}`);
+        });
+    }
+  });
+  
+  // Initial check
+  if (window.activeTextEditor && window.activeTextEditor.document) {
+      const uri = window.activeTextEditor.document.uri.toString();
+      client.sendRequest("workspace/executeCommand", {
+          command: "lsp-agent.active-doc",
+          arguments: [uri]
+      }).catch(err => {
+           outputChannel.appendLine(`[LSP Agent] Failed to send initial active doc: ${err}`);
+      });
+  }
+
   client.onRequest("custom/inference", async (params: any) => {
     outputChannel.appendLine(`[LSP Agent] Received custom/inference request: ${JSON.stringify(params)}`);
     window.showInformationMessage("Agent Request: " + params.request);
