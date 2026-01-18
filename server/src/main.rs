@@ -1,9 +1,9 @@
-use automerge_repo::{ConnDirection, DocHandle, DocumentId, Repo, Storage, StorageError};
+use automerge_repo::{ConnDirection, DocHandle, Repo};
 use autosurgeon::{hydrate, reconcile};
-use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use shared_document::{ChatRequest, ChatResponse, DocumentContent, Id, LspAgent, NoStorage, Uri};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::process::{Child, Command};
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
@@ -34,6 +34,7 @@ struct Backend {
     client: Client,
     doc_handle: DocHandle,
     agent_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    web_child: Mutex<Option<Child>>,
 }
 
 #[tower_lsp::async_trait]
@@ -77,6 +78,11 @@ impl LanguageServer for Backend {
 
         if let Some(task) = self.agent_task.lock().await.take() {
             let _ = task.await;
+        }
+
+        if let Some(mut child) = self.web_child.lock().await.take() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
         }
         Ok(())
     }
@@ -342,12 +348,34 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
+    let exe_path = std::env::current_exe().expect("Failed to get current exe path");
+    // Assuming structure: lsp_agent/server/target/debug/server
+    // We want: lsp_agent/web/target/debug/web
+    let project_root = exe_path
+        .parent() // debug
+        .and_then(|p| p.parent()) // target
+        .and_then(|p| p.parent()) // server
+        .and_then(|p| p.parent()) // lsp_agent
+        .expect("Failed to find project root");
+
+    let web_binary = project_root.join("web/target/debug/web");
+
+    let mut child = Command::new(web_binary);
+
+    // Explicitly inherit stderr to see what is happening,
+    // but ensure stdout is piped or null so it doesn't break LSP JSON-RPC
+    child.stdout(std::process::Stdio::null());
+    child.stderr(std::process::Stdio::inherit());
+
+    let child = child.spawn().expect("Failed to spawn web client");
+
     let (service, socket) = LspService::new(|client| {
         let (doc_handle, task) = start_automerge_infrastructure(client.clone());
         Backend {
             client,
             doc_handle,
             agent_task: Mutex::new(Some(task)),
+            web_child: Mutex::new(Some(child)),
         }
     });
     Server::new(stdin, stdout, socket).serve(service).await;

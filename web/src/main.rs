@@ -103,14 +103,6 @@ async fn main() {
         _ = serve.into_future() => {},
         _ = tokio::signal::ctrl_c() => {
             println!("Shutting down...");
-
-            // Cleanup logic
-            let (tx, rx) = oneshot::channel::<()>();
-
-            // In a real app we might trigger other shutdown signals here
-            tx.send(()).unwrap();
-            rx.await.unwrap();
-
             handle.spawn_blocking(move || {
                 repo_handle.stop().unwrap();
             }).await.unwrap();
