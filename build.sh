@@ -7,6 +7,12 @@ cargo fmt
 cargo build
 cd ..
 
+echo "=== Building Rust Web Client ==="
+cd web
+cargo fmt
+cargo build
+cd ..
+
 echo "=== Building TypeScript Client ==="
 cd client
 # Only run install if node_modules doesn't exist to save time

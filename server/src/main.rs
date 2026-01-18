@@ -1,8 +1,8 @@
 use automerge_repo::{ConnDirection, DocHandle, DocumentId, Repo, Storage, StorageError};
-use autosurgeon::{Hydrate, Reconcile, hydrate, reconcile};
+use autosurgeon::{hydrate, reconcile};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use shared_document::{ChatRequest, ChatResponse, DocumentContent, Id, LspAgent, NoStorage, Uri};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
@@ -190,113 +190,6 @@ impl LanguageServer for Backend {
 const PEER1_PORT: u16 = 2341;
 const PEER2_PORT: u16 = 2342;
 
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
-struct ChatRequest {
-    content: String,
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
-struct ChatResponse {
-    content: String,
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
-struct DocumentContent {
-    text: String,
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default, Hash, Eq)]
-struct Id {
-    value: String,
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
-struct Uri {
-    value: String,
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
-struct DocumentManager {
-    documents: HashMap<String, DocumentContent>,
-    active_document: Option<Uri>,
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
-struct LspAgent {
-    requests: HashMap<Id, ChatRequest>,
-    responses: HashMap<Id, ChatResponse>,
-    text_documents: DocumentManager,
-    webviews: DocumentManager,
-    should_exit: bool,
-}
-
-impl std::fmt::Display for Id {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.value)
-    }
-}
-
-impl AsRef<str> for Id {
-    fn as_ref(&self) -> &str {
-        &self.value
-    }
-}
-
-impl From<String> for Id {
-    fn from(s: String) -> Self {
-        Id { value: s }
-    }
-}
-
-impl std::str::FromStr for Id {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        Ok(Id {
-            value: s.to_string(),
-        })
-    }
-}
-
-/*
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
-struct InferenceRequest(String);
-
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
-struct InferenceResponse(String);
-*/
-
-struct NoStorage;
-
-impl Storage for NoStorage {
-    fn get(
-        &self,
-        _id: DocumentId,
-    ) -> BoxFuture<'static, std::result::Result<Option<Vec<u8>>, StorageError>> {
-        Box::pin(futures::future::ready(Ok(None)))
-    }
-
-    fn list_all(&self) -> BoxFuture<'static, std::result::Result<Vec<DocumentId>, StorageError>> {
-        Box::pin(futures::future::ready(Ok(vec![])))
-    }
-
-    fn append(
-        &self,
-        _id: DocumentId,
-        _changes: Vec<u8>,
-    ) -> BoxFuture<'static, std::result::Result<(), StorageError>> {
-        Box::pin(futures::future::ready(Ok(())))
-    }
-
-    fn compact(
-        &self,
-        _id: DocumentId,
-        _full_doc: Vec<u8>,
-    ) -> BoxFuture<'static, std::result::Result<(), StorageError>> {
-        Box::pin(futures::future::ready(Ok(())))
-    }
-}
-
 fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::JoinHandle<()>) {
     let handle = Handle::current();
 
@@ -307,6 +200,19 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
     // 2. Bootstrap Document
     let doc_handle = repo_handle1.new_document();
     let doc_id = doc_handle.document_id();
+
+    // Spawn HTTP Server for doc_id
+    let doc_id_str = doc_id.to_string();
+    tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/doc_id",
+            axum::routing::get(move || async move { doc_id_str }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:2348")
+            .await
+            .unwrap();
+        axum::serve(listener, app).await.unwrap();
+    });
 
     doc_handle.with_doc_mut(|doc| {
         let mut tx = doc.transaction();
@@ -426,65 +332,6 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
                     .await;
             }
         }
-    });
-
-    // 5. Spawn Test Task (Simulate Peer 2)
-    let doc_id_clone = doc_id.clone();
-    handle.spawn(async move {
-        let repo2 = Repo::new(None, Box::new(NoStorage));
-        let repo_handle2 = repo2.run();
-        let repo_clone2 = repo_handle2.clone();
-        let addr2 = format!("127.0.0.1:{}", PEER2_PORT);
-
-        // Listen as Peer 2
-        tokio::spawn(async move {
-            match TcpListener::bind(&addr2).await {
-                Ok(listener) => loop {
-                    if let Ok((socket, addr)) = listener.accept().await {
-                        repo_clone2
-                            .connect_tokio_io(addr, socket, ConnDirection::Incoming)
-                            .await
-                            .unwrap();
-                    }
-                },
-                Err(e) => {
-                    eprintln!("Failed to bind Peer 2: {:?}", e);
-                }
-            }
-        });
-
-        // Request Doc
-        let doc_handle_peer2 = repo_handle2.request_document(doc_id_clone).await.unwrap();
-
-        // Wait for sync (simple hacky wait)
-        sleep(Duration::from_millis(2000)).await;
-
-        let req_id = Id {
-            value: Uuid::new_v4().to_string(),
-        };
-
-        doc_handle_peer2.with_doc_mut(|doc| {
-            let mut agent: LspAgent = hydrate(doc).unwrap();
-            agent.requests.insert(
-                req_id.clone(),
-                ChatRequest {
-                    content: "Hello World".to_string(),
-                },
-            );
-            let mut tx = doc.transaction();
-            reconcile(&mut tx, &agent).unwrap();
-            tx.commit();
-        });
-
-        // Watch for Response
-        loop {
-            doc_handle_peer2.changed().await.unwrap();
-            let agent: LspAgent = doc_handle_peer2.with_doc(|doc| hydrate(doc).unwrap());
-            if let Some(_resp) = agent.responses.get(&req_id) {
-                break;
-            }
-        }
-        repo_handle2.stop().unwrap();
     });
 
     (doc_handle, main_task)

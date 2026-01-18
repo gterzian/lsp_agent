@@ -1,0 +1,10 @@
+[package]
+name = "shared_document"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+autosurgeon = "0.10.1"
+automerge = "0.7.3"
+automerge_repo = "0.3.0"
+futures = "0.3.31"
