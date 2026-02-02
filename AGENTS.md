@@ -1,5 +1,7 @@
 # Build Instructions
 
+**Note: Always build the project after having made a change.**
+
 To build the entire project (Rust server and TypeScript client), run the build script in the root directory:
 
 ```bash
@@ -23,4 +25,13 @@ To build it manually:
 cd client
 npm install
 npm run compile
+```
+
+### Dependency Management
+
+If you need to install updated dependencies for the web project:
+
+```bash
+chmod +x install_deps.sh
+./install_deps.sh
 ```
