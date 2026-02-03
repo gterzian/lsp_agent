@@ -22,3 +22,29 @@ Your response should be a complete HTML document starting with `<!DOCTYPE html>`
 - Inline JavaScript functionality
 
 The application should be fully functional and ready to use immediately upon opening in a browser.
+## Custom Inference Protocol
+
+The web environment supports a custom protocol for making inference calls to the backend. This allows the web application to perform AI inference tasks without needing external API keys.
+
+Protocol URL: `wry://inference`
+Method: `POST` (or simply sending the body)
+Body: The prompt text to be sent for inference.
+
+Example usage in JavaScript:
+
+```javascript
+async function makeInference(prompt) {
+    try {
+        const response = await fetch('wry://inference', {
+            method: 'POST',
+            body: prompt
+        });
+        const result = await response.text();
+        return result;
+    } catch (error) {
+        console.error('Inference error:', error);
+    }
+}
+```
+
+The request is raw and is not augmented with any system prompt. It is added to a queue and processed sequentially.

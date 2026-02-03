@@ -34,14 +34,16 @@ impl Storage for NoStorage {
     }
 }
 
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
-pub struct ChatRequest {
-    pub content: String,
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+pub enum AgentRequest {
+    Chat { content: String, model: Option<String> },
+    Inference(String),
 }
 
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
-pub struct ChatResponse {
-    pub content: String,
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+pub enum AgentResponse {
+    Chat(String),
+    Inference(String),
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
@@ -67,11 +69,12 @@ pub struct DocumentManager {
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
 pub struct LspAgent {
-    pub requests: Vec<ChatRequest>,
-    pub responses: Vec<ChatResponse>,
+    pub requests: Vec<AgentRequest>,
+    pub responses: Vec<AgentResponse>,
     pub text_documents: DocumentManager,
     pub webviews: DocumentManager,
     pub should_exit: bool,
+    pub active_model: Option<String>,
 }
 
 impl std::fmt::Display for Id {

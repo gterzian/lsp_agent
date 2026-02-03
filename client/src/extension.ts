@@ -97,9 +97,19 @@ export async function activate(context: ExtensionContext) {
             vendor: 'copilot'
         });
         
-        // Find GPT-5 mini or fallback to first
-        const model = models.find(m => m.name.includes('GPT-5 mini')) || models[0];
+        let model = models[0];
         
+        if (params.model) {
+            outputChannel.appendLine(`[LSP Agent] Requesting specific model: ${params.model}`);
+            // Try explicit match first (id)
+            model = models.find(m => m.id === params.model) || 
+                    models.find(m => m.name.includes(params.model)) || 
+                    model;
+        } else {
+             // Default to GPT-5 mini
+             model = models.find(m => m.name.includes('GPT-5 mini')) || models[0];
+        }
+
         if (!model) {
              return { response: "No models available" };
         }
@@ -130,11 +140,12 @@ export async function activate(context: ExtensionContext) {
   const chatParticipant = chat.createChatParticipant("lsp-agent.chat", async (request, context, response, token) => {
     response.markdown("Sending request to LSP server...");
     const userPrompt = request.prompt;
+    const modelId = request.model.id;
     
     try {
         await client.sendRequest("workspace/executeCommand", { 
             command: "lsp-agent.log-chat", 
-            arguments: [userPrompt] 
+            arguments: [userPrompt, modelId] 
         });
         response.markdown(`\n\nRequest logged by server.`);
     } catch (err) {

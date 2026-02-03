@@ -1,7 +1,7 @@
 use automerge_repo::{ConnDirection, DocHandle, Repo};
 use autosurgeon::{hydrate, reconcile};
 use serde::{Deserialize, Serialize};
-use shared_document::{ChatRequest, ChatResponse, DocumentContent, LspAgent, NoStorage, Uri};
+use shared_document::{AgentRequest, AgentResponse, DocumentContent, LspAgent, NoStorage, Uri};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
 use tokio::runtime::Handle;
@@ -22,6 +22,7 @@ impl tower_lsp::lsp_types::request::Request for InferenceLspRequest {
 #[derive(Serialize, Deserialize, Debug)]
 struct InferenceParams {
     request: String,
+    model: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -154,10 +155,20 @@ impl LanguageServer for Backend {
                 let system_prompt = include_str!("../../prompts/web-environment.md");
                 let request_text = format!("{}\n\n{}", system_prompt, arg);
 
+                let model = params
+                    .arguments
+                    .get(1)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
                 self.doc_handle.with_doc_mut(|doc| {
                     let mut agent: LspAgent = hydrate(doc).unwrap();
-                    agent.requests.push(ChatRequest {
+                    if let Some(m) = &model {
+                        agent.active_model = Some(m.clone());
+                    }
+                    agent.requests.push(AgentRequest::Chat {
                         content: request_text,
+                        model: model.clone(), // Still pass it in the request for immediate use if needed
                     });
                     let mut tx = doc.transaction();
                     reconcile(&mut tx, &agent).unwrap();
@@ -273,22 +284,23 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
         loop {
             main_task_doc_handle.changed().await.unwrap();
 
-            let (should_exit, pending_request) = main_task_doc_handle.with_doc_mut(|doc| {
-                let mut agent: LspAgent = hydrate(doc).unwrap();
-                let req = if !agent.requests.is_empty() {
-                    Some(agent.requests.remove(0))
-                } else {
-                    None
-                };
+            let (should_exit, pending_request, active_model) =
+                main_task_doc_handle.with_doc_mut(|doc| {
+                    let mut agent: LspAgent = hydrate(doc).unwrap();
+                    let req = if !agent.requests.is_empty() {
+                        Some(agent.requests.remove(0))
+                    } else {
+                        None
+                    };
 
-                if req.is_some() {
-                    let mut tx = doc.transaction();
-                    reconcile(&mut tx, &agent).unwrap();
-                    tx.commit();
-                }
+                    if req.is_some() {
+                        let mut tx = doc.transaction();
+                        reconcile(&mut tx, &agent).unwrap();
+                        tx.commit();
+                    }
 
-                (agent.should_exit, req)
-            });
+                    (agent.should_exit, req, agent.active_model)
+                });
 
             if should_exit {
                 main_task_client
@@ -304,10 +316,26 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
             }
 
             if let Some(req) = pending_request {
-                let req_str = req.content;
+                let (req_str, is_chat, model_hint) = match req {
+                    AgentRequest::Chat { content, model } => (content, true, model),
+                    AgentRequest::Inference(s) => {
+                        main_task_client
+                            .log_message(
+                                MessageType::INFO,
+                                format!(
+                                    "App Inference Request (using active model {:?}): {}",
+                                    active_model, s
+                                ),
+                            )
+                            .await;
+                        (s, false, active_model.clone())
+                    }
+                };
+
                 let response_str = {
                     let params = InferenceParams {
                         request: req_str.clone(),
+                        model: model_hint,
                     };
                     match main_task_client
                         .send_request::<InferenceLspRequest>(params)
@@ -323,9 +351,12 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
 
                 main_task_doc_handle.with_doc_mut(|doc| {
                     let mut agent: LspAgent = hydrate(doc).unwrap();
-                    agent.responses.push(ChatResponse {
-                        content: response_str.clone(),
-                    });
+                    let response_enum = if is_chat {
+                        AgentResponse::Chat(response_str.clone())
+                    } else {
+                        AgentResponse::Inference(response_str.clone())
+                    };
+                    agent.responses.push(response_enum);
                     let mut tx = doc.transaction();
                     reconcile(&mut tx, &agent).unwrap();
                     tx.commit();
