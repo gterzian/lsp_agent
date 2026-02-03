@@ -1,15 +1,14 @@
-use automerge_repo::{ConnDirection, DocumentId, Repo, Storage, StorageError};
+use automerge_repo::{ConnDirection, DocumentId, Repo};
 use autosurgeon::{hydrate, reconcile};
-use shared_document::{ChatRequest, Id, LspAgent, NoStorage};
+use shared_document::{LspAgent, NoStorage};
 use std::thread;
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
-use uuid::Uuid;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 use wry::WebView;
 
@@ -23,7 +22,6 @@ enum AgentEvent {
 
 #[derive(Debug)]
 enum BackendCommand {
-    Start,
     Shutdown,
 }
 
@@ -36,9 +34,6 @@ struct App {
 impl ApplicationHandler<AgentEvent> for App {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
         // Send signal to start the backend logic
-        if self.window.is_none() {
-            let _ = self.tx_backend.blocking_send(BackendCommand::Start);
-        }
     }
 
     fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -132,18 +127,24 @@ fn main() {
 
             // Request Doc
             let doc_handle = repo_handle.request_document(doc_id.clone()).await.unwrap();
-            let mut req_id: Option<Id> = None;
 
             loop {
                 tokio::select! {
                     _ = doc_handle.changed() => {
-                        let (should_exit, response_content) = doc_handle.with_doc(|doc| {
-                            let agent: LspAgent = hydrate(doc).unwrap();
-                            let resp =  if let Some(rid) = &req_id {
-                                agent.responses.get(rid).map(|r| r.content.clone())
+                        let (should_exit, response_content) = doc_handle.with_doc_mut(|doc| {
+                            let mut agent: LspAgent = hydrate(doc).unwrap();
+                            let resp = if !agent.responses.is_empty() {
+                                Some(agent.responses.remove(0).content)
                             } else {
                                 None
                             };
+
+                            if resp.is_some() {
+                                let mut tx = doc.transaction();
+                                reconcile(&mut tx, &agent).unwrap();
+                                tx.commit();
+                            }
+
                             (agent.should_exit, resp)
                         });
 
@@ -159,29 +160,6 @@ fn main() {
                     }
                     Some(cmd) = rx_backend.recv() => {
                         match cmd {
-                            BackendCommand::Start => {
-                                if req_id.is_some() { continue; }
-                                println!("Sending Request...");
-                                let rid = Id {
-                                    value: Uuid::new_v4().to_string(),
-                                };
-                                let system_prompt = include_str!("../../prompts/web-environment.md");
-                                let request_content =
-                                    format!("{}\n\n{}", system_prompt, "Log Hello world to the console");
-                                doc_handle.with_doc_mut(|doc| {
-                                    let mut agent: LspAgent = hydrate(doc).unwrap();
-                                    agent.requests.insert(
-                                        rid.clone(),
-                                        ChatRequest {
-                                            content: request_content,
-                                        },
-                                    );
-                                    let mut tx = doc.transaction();
-                                    reconcile(&mut tx, &agent).unwrap();
-                                    tx.commit();
-                                });
-                                req_id = Some(rid);
-                            }
                             BackendCommand::Shutdown => {
                                 println!("Backend received shutdown command, updating doc...");
                                 doc_handle.with_doc_mut(|doc| {

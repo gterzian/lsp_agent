@@ -67,8 +67,8 @@ pub struct DocumentManager {
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
 pub struct LspAgent {
-    pub requests: HashMap<Id, ChatRequest>,
-    pub responses: HashMap<Id, ChatResponse>,
+    pub requests: Vec<ChatRequest>,
+    pub responses: Vec<ChatResponse>,
     pub text_documents: DocumentManager,
     pub webviews: DocumentManager,
     pub should_exit: bool,

@@ -1,7 +1,7 @@
 use automerge_repo::{ConnDirection, DocHandle, Repo};
 use autosurgeon::{hydrate, reconcile};
 use serde::{Deserialize, Serialize};
-use shared_document::{ChatRequest, ChatResponse, DocumentContent, Id, LspAgent, NoStorage, Uri};
+use shared_document::{ChatRequest, ChatResponse, DocumentContent, LspAgent, NoStorage, Uri};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
 use tokio::runtime::Handle;
@@ -10,7 +10,6 @@ use tokio::time::{Duration, sleep};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use uuid::Uuid;
 
 struct InferenceLspRequest;
 
@@ -145,19 +144,14 @@ impl LanguageServer for Backend {
     ) -> Result<Option<serde_json::Value>> {
         if params.command == "lsp-agent.log-chat" {
             if let Some(arg) = params.arguments.first().and_then(|v| v.as_str()) {
-                let request_text = arg.to_string();
-                let req_id = Id {
-                    value: Uuid::new_v4().to_string(),
-                };
+                let system_prompt = include_str!("../../prompts/web-environment.md");
+                let request_text = format!("{}\n\n{}", system_prompt, arg);
 
                 self.doc_handle.with_doc_mut(|doc| {
                     let mut agent: LspAgent = hydrate(doc).unwrap();
-                    agent.requests.insert(
-                        req_id.clone(),
-                        ChatRequest {
-                            content: request_text,
-                        },
-                    );
+                    agent.requests.push(ChatRequest {
+                        content: request_text,
+                    });
                     let mut tx = doc.transaction();
                     reconcile(&mut tx, &agent).unwrap();
                     tx.commit();
@@ -272,21 +266,22 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
         loop {
             main_task_doc_handle.changed().await.unwrap();
 
-            let (should_exit, pending_request) =
-                main_task_doc_handle.with_doc(|doc| match hydrate::<_, LspAgent>(doc) {
-                    Ok(agent) => (
-                        agent.should_exit,
-                        agent
-                            .requests
-                            .iter()
-                            .find(|(id, _)| !agent.responses.contains_key(*id))
-                            .map(|(id, req)| (id.clone(), req.content.clone())),
-                    ),
-                    Err(e) => {
-                        eprintln!("Error in Agent Loop: {:?}", e);
-                        (false, None)
-                    }
-                });
+            let (should_exit, pending_request) = main_task_doc_handle.with_doc_mut(|doc| {
+                let mut agent: LspAgent = hydrate(doc).unwrap();
+                let req = if !agent.requests.is_empty() {
+                    Some(agent.requests.remove(0))
+                } else {
+                    None
+                };
+
+                if req.is_some() {
+                    let mut tx = doc.transaction();
+                    reconcile(&mut tx, &agent).unwrap();
+                    tx.commit();
+                }
+
+                (agent.should_exit, req)
+            });
 
             if should_exit {
                 Handle::current()
@@ -298,7 +293,8 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
                 break;
             }
 
-            if let Some((req_id, req_str)) = pending_request {
+            if let Some(req) = pending_request {
+                let req_str = req.content;
                 let response_str = {
                     let params = InferenceParams {
                         request: req_str.clone(),
@@ -317,17 +313,12 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
 
                 main_task_doc_handle.with_doc_mut(|doc| {
                     let mut agent: LspAgent = hydrate(doc).unwrap();
-                    if !agent.responses.contains_key(&req_id) {
-                        agent.responses.insert(
-                            req_id,
-                            ChatResponse {
-                                content: response_str.clone(),
-                            },
-                        );
-                        let mut tx = doc.transaction();
-                        reconcile(&mut tx, &agent).unwrap();
-                        tx.commit();
-                    }
+                    agent.responses.push(ChatResponse {
+                        content: response_str.clone(),
+                    });
+                    let mut tx = doc.transaction();
+                    reconcile(&mut tx, &agent).unwrap();
+                    tx.commit();
                 });
 
                 main_task_client
