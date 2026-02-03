@@ -1,15 +1,15 @@
 use automerge_repo::{ConnDirection, DocumentId, Repo};
 use autosurgeon::{hydrate, reconcile};
 use shared_document::{LspAgent, NoStorage};
+use std::collections::HashMap;
 use std::thread;
+use tao::event::{Event, WindowEvent};
+use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::window::{Window, WindowId};
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
-use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::window::{Window, WindowAttributes, WindowId};
 use wry::WebView;
 
 const PEER2_PORT: u16 = 2342;
@@ -17,71 +17,13 @@ const PEER2_PORT: u16 = 2342;
 #[derive(Debug)]
 enum AgentEvent {
     Response(String),
-    ShutDown,
-}
-
-#[derive(Debug)]
-enum BackendCommand {
-    Shutdown,
-}
-
-struct App {
-    window: Option<Window>,
-    webview: Option<WebView>,
-    tx_backend: mpsc::Sender<BackendCommand>,
-}
-
-impl ApplicationHandler<AgentEvent> for App {
-    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
-        // Send signal to start the backend logic
-    }
-
-    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        match event {
-            WindowEvent::CloseRequested => {
-                println!("The close button was pressed; sending shutdown signal");
-                let _ = self.tx_backend.blocking_send(BackendCommand::Shutdown);
-            }
-            _ => (),
-        }
-    }
-
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AgentEvent) {
-        match event {
-            AgentEvent::Response(html) => {
-                println!("Received HTML response, creating webview...");
-                if self.window.is_none() {
-                    let window = event_loop
-                        .create_window(WindowAttributes::default().with_title("LSP Agent Web"))
-                        .unwrap();
-                    self.window = Some(window);
-                }
-
-                if self.webview.is_none() {
-                    if let Some(window) = &self.window {
-                        let webview = wry::WebViewBuilder::new()
-                            .with_html(html)
-                            .build(window)
-                            .unwrap();
-                        self.webview = Some(webview);
-                    }
-                }
-            }
-            AgentEvent::ShutDown => {
-                println!("Shutting down due to signal...");
-                event_loop.exit();
-            }
-        }
-    }
 }
 
 fn main() {
-    let event_loop = EventLoop::<AgentEvent>::with_user_event().build().unwrap();
+    let event_loop = EventLoopBuilder::<AgentEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
-    let (tx_backend, mut rx_backend) = mpsc::channel(10);
-
-    thread::spawn(move || {
+    let backend_handle = thread::spawn(move || {
         let rt = Runtime::new().unwrap();
         rt.block_on(async move {
             println!("Backend thread started...");
@@ -149,7 +91,6 @@ fn main() {
                         });
 
                         if should_exit {
-                            let _ = proxy.send_event(AgentEvent::ShutDown);
                             break;
                         }
 
@@ -158,30 +99,61 @@ fn main() {
                             let _ = proxy.send_event(AgentEvent::Response(content));
                         }
                     }
-                    Some(cmd) = rx_backend.recv() => {
-                        match cmd {
-                            BackendCommand::Shutdown => {
-                                println!("Backend received shutdown command, updating doc...");
-                                doc_handle.with_doc_mut(|doc| {
-                                    let mut agent: LspAgent = hydrate(doc).unwrap();
-                                    agent.should_exit = true;
-                                    let mut tx = doc.transaction();
-                                    reconcile(&mut tx, &agent).unwrap();
-                                    tx.commit();
-                                });
-                            }
-                        }
-                    }
                 }
             }
         });
     });
 
-    let mut app = App {
-        window: None,
-        webview: None,
-        tx_backend: tx_backend,
-    };
+    let mut views: HashMap<WindowId, (Window, WebView)> = HashMap::new();
+    let mut backend_handle_opt = Some(backend_handle);
 
-    event_loop.run_app(&mut app).unwrap();
+    event_loop.run(move |event, window_target, control_flow| {
+        *control_flow = ControlFlow::Wait;
+
+        match event {
+            Event::UserEvent(AgentEvent::Response(content)) => {
+                println!("Received HTML response, creating webview...");
+
+                let window = tao::window::WindowBuilder::new()
+                    .with_title("LSP Agent Web")
+                    .build(window_target)
+                    .unwrap();
+                let id = window.id();
+
+                let clean_content = content.trim();
+                let clean_content = if let Some(stripped) = clean_content.strip_prefix("```html") {
+                    stripped
+                } else if let Some(stripped) = clean_content.strip_prefix("```") {
+                    stripped
+                } else {
+                    clean_content
+                };
+                let clean_content = clean_content
+                    .strip_suffix("```")
+                    .unwrap_or(clean_content)
+                    .trim();
+
+                let webview = wry::WebViewBuilder::new()
+                    .with_html(clean_content)
+                    .build(&window)
+                    .unwrap();
+
+                views.insert(id, (window, webview));
+            }
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                window_id,
+                ..
+            } => {
+                println!("The close button was pressed.");
+                views.remove(&window_id);
+            }
+            Event::LoopDestroyed => {
+                if let Some(handle) = backend_handle_opt.take() {
+                    let _ = handle.join();
+                }
+            }
+            _ => (),
+        }
+    });
 }

@@ -58,6 +58,12 @@ export async function activate(context: ExtensionContext) {
   await client.start();
   outputChannel.appendLine(`[LSP Agent] Client started.`);
 
+  client.onNotification("lsp-agent/shutdown", async () => {
+      outputChannel.appendLine(`[LSP Agent] Received shutdown signal from server. Stopping client.`);
+      window.showInformationMessage("LSP Agent Server has shutdown.");
+      await client.stop();
+  });
+
   // Listen for active editor changes
   window.onDidChangeActiveTextEditor(editor => {
     if (editor && editor.document) {

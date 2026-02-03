@@ -29,6 +29,13 @@ struct InferenceResult {
     response: String,
 }
 
+enum ShutdownExtension {}
+
+impl tower_lsp::lsp_types::notification::Notification for ShutdownExtension {
+    type Params = ();
+    const METHOD: &'static str = "lsp-agent/shutdown";
+}
+
 struct Backend {
     client: Client,
     doc_handle: DocHandle,
@@ -284,6 +291,9 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
             });
 
             if should_exit {
+                main_task_client
+                    .send_notification::<ShutdownExtension>(())
+                    .await;
                 Handle::current()
                     .spawn_blocking(|| {
                         main_task_repo_handle.stop().unwrap();
