@@ -129,7 +129,10 @@ impl LanguageServer for Backend {
                     .get(1)
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                self.agent.chat_request(user_input, model).await;
+                let response = self.agent.chat_request(user_input, model).await;
+                if let Some(message) = response {
+                    return Ok(Some(serde_json::Value::String(message)));
+                }
                 return Ok(None);
             }
         } else if params.command == "lsp-agent.active-doc" {

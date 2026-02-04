@@ -13,5 +13,5 @@ pub trait Agent: Send + Sync {
     async fn did_change(&self, uri: String, text: String);
     async fn did_close(&self, uri: String);
     async fn set_active_document(&self, uri: String);
-    async fn chat_request(&self, content: String, model: Option<String>);
+    async fn chat_request(&self, content: String, model: Option<String>) -> Option<String>;
 }

@@ -9,11 +9,12 @@ pub use document::{
 use automerge_repo::{ConnDirection, DocHandle, Repo};
 use autosurgeon::{hydrate, reconcile};
 use serde::Deserialize;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
 use tokio::runtime::Handle;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 use tokio::time::{sleep, Duration};
 use traits::{Agent, AgentClient};
 use uuid::Uuid;
@@ -32,6 +33,7 @@ fn find_repo_root(exe_path: &std::path::Path) -> Option<std::path::PathBuf> {
 
 const PEER1_PORT: u16 = 2341;
 const PEER2_PORT: u16 = 2342;
+const DEFAULT_TOOL_MAX_ITERATIONS: usize = 3;
 
 #[derive(Deserialize, Debug)]
 struct ToolResponse {
@@ -41,13 +43,15 @@ struct ToolResponse {
 }
 
 pub fn start_infra(client: Arc<dyn AgentClient>) -> Box<dyn Agent> {
-    let (doc_handle, task) = start_automerge_infrastructure(client);
+    let pending_chat = Arc::new(Mutex::new(VecDeque::new()));
+    let (doc_handle, task) = start_automerge_infrastructure(client, pending_chat.clone());
     let child = spawn_web_client();
 
     Box::new(AutomergeAgent {
         doc_handle,
         agent_task: Mutex::new(Some(task)),
         web_child: Mutex::new(child),
+        pending_chat,
     })
 }
 
@@ -55,6 +59,7 @@ struct AutomergeAgent {
     doc_handle: DocHandle,
     agent_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     web_child: Mutex<Option<Child>>,
+    pending_chat: Arc<Mutex<VecDeque<oneshot::Sender<Option<String>>>>>,
 }
 
 #[async_trait::async_trait]
@@ -124,7 +129,12 @@ impl Agent for AutomergeAgent {
         });
     }
 
-    async fn chat_request(&self, content: String, model: Option<String>) {
+    async fn chat_request(&self, content: String, model: Option<String>) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut queue = self.pending_chat.lock().await;
+            queue.push_back(tx);
+        }
         self.doc_handle.with_doc_mut(|doc| {
             let mut agent: LspAgent = hydrate(doc).unwrap();
             agent
@@ -134,6 +144,7 @@ impl Agent for AutomergeAgent {
             reconcile(&mut tx, &agent).unwrap();
             tx.commit();
         });
+        rx.await.ok().flatten()
     }
 }
 
@@ -184,6 +195,7 @@ fn spawn_web_client() -> Option<Child> {
 
 fn start_automerge_infrastructure(
     client: Arc<dyn AgentClient>,
+    pending_chat: Arc<Mutex<VecDeque<oneshot::Sender<Option<String>>>>>,
 ) -> (DocHandle, tokio::task::JoinHandle<()>) {
     let handle = Handle::current();
 
@@ -216,6 +228,7 @@ fn start_automerge_infrastructure(
     let main_task_repo_handle = repo_handle1.clone();
     let main_task_client = client.clone();
 
+    let pending_chat_queue = pending_chat.clone();
     let main_task = handle.spawn(async move {
         let repo_clone1 = main_task_repo_handle.clone();
         tokio::spawn(async move {
@@ -291,14 +304,14 @@ fn start_automerge_infrastructure(
                 };
 
                 if is_chat {
-                    let (history, running_apps) = main_task_doc_handle.with_doc_mut(|doc| {
+                    let (history, running_apps) = main_task_doc_handle.with_doc(|doc| {
                         let agent: LspAgent = hydrate(doc).unwrap();
                         (
                             agent.conversation_history.clone(),
                             collect_apps(&agent.webviews),
                         )
                     });
-                    let docs_info = main_task_doc_handle.with_doc_mut(|doc| {
+                    let docs_info = main_task_doc_handle.with_doc(|doc| {
                         let agent: LspAgent = hydrate(doc).unwrap();
                         collect_docs(&agent.text_documents)
                     });
@@ -308,8 +321,14 @@ fn start_automerge_infrastructure(
                     let mut docs_payload: Option<prompts::DocsInfo> = None;
                     let mut response_message: Option<String> = None;
                     let mut launched_app: Option<String> = None;
+                    let mut did_nothing = false;
 
-                    for _ in 0..3 {
+                    let max_iterations = std::env::var("LSP_AGENT_TOOL_MAX_ITERATIONS")
+                        .ok()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(DEFAULT_TOOL_MAX_ITERATIONS);
+
+                    for _ in 0..max_iterations {
                         let request_text = prompts::build_web_request(
                             &history,
                             &latest_user,
@@ -326,9 +345,12 @@ fn start_automerge_infrastructure(
                                 response_message = tool_response.message;
                                 break;
                             }
+                            "nothing" => {
+                                did_nothing = true;
+                                break;
+                            }
                             "launch_app" => {
                                 launched_app = tool_response.app;
-                                break;
                             }
                             "list_apps" => {
                                 if apps_payload.is_some() {
@@ -354,24 +376,28 @@ fn start_automerge_infrastructure(
                             }
                             _ => {
                                 response_message = Some(tool_response_str);
-                                break;
                             }
                         }
                     }
 
-                    if launched_app.is_none() && response_message.is_none() {
+                    if !did_nothing && launched_app.is_none() && response_message.is_none() {
                         response_message = Some(
                             "No actionable response was produced. Please retry or rephrase."
                                 .to_string(),
                         );
                     }
 
+                    let launched_app_for_doc = launched_app.clone();
+                    let did_launch_app = launched_app.is_some();
+                    let did_request_docs = docs_payload.is_some();
+                    let did_request_apps = apps_payload.is_some();
+
                     main_task_doc_handle.with_doc_mut(|doc| {
                         let mut agent: LspAgent = hydrate(doc).unwrap();
                         if let Some(model) = model_hint.clone() {
                             agent.active_model = Some(model);
                         }
-                        if let Some(app) = launched_app {
+                        if let Some(app) = launched_app_for_doc {
                             let app_id = format!("app-{}", Uuid::new_v4());
                             agent
                                 .webviews
@@ -381,7 +407,22 @@ fn start_automerge_infrastructure(
                                 id: app_id.clone(),
                                 content: app,
                             });
-                        } else if let Some(message) = response_message {
+                            agent.conversation_history.push(ConversationFragment::Assistant(
+                                "App was launched, do you want to perhaps add a message to the user?"
+                                    .to_string(),
+                            ));
+                        }
+                        if did_request_apps {
+                            agent.conversation_history.push(ConversationFragment::Assistant(
+                                "Assistant requested info on running apps.".to_string(),
+                            ));
+                        }
+                        if did_request_docs {
+                            agent.conversation_history.push(ConversationFragment::Assistant(
+                                "Assistant requested info on open documents.".to_string(),
+                            ));
+                        }
+                        if let Some(message) = response_message.clone() {
                             if !latest_user.is_empty() {
                                 agent
                                     .conversation_history
@@ -395,6 +436,16 @@ fn start_automerge_infrastructure(
                         reconcile(&mut tx, &agent).unwrap();
                         tx.commit();
                     });
+
+                    if let Some(message) = response_message {
+                        if let Some(sender) = pending_chat_queue.lock().await.pop_front() {
+                            let _ = sender.send(Some(message));
+                        }
+                    } else if did_launch_app || did_nothing {
+                        if let Some(sender) = pending_chat_queue.lock().await.pop_front() {
+                            let _ = sender.send(None);
+                        }
+                    }
                 } else {
                     let response_str =
                         call_inference(main_task_client.as_ref(), req_str.clone(), model_hint.clone())
