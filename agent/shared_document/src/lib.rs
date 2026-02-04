@@ -43,7 +43,7 @@ pub enum AgentRequest {
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
 pub enum AgentResponse {
     Chat(String),
-    Inference(String),
+    Inference { app_id: String, content: String },
     WebApp { id: String, content: String },
 }
 

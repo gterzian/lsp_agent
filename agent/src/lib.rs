@@ -351,6 +351,7 @@ fn start_automerge_infrastructure(
                             }
                             "launch_app" => {
                                 launched_app = tool_response.app;
+                                break;
                             }
                             "list_apps" => {
                                 if apps_payload.is_some() {
@@ -452,9 +453,10 @@ fn start_automerge_infrastructure(
                             .await;
                     main_task_doc_handle.with_doc_mut(|doc| {
                         let mut agent: LspAgent = hydrate(doc).unwrap();
-                        agent
-                            .responses
-                            .push(AgentResponse::Inference(response_str.clone()));
+                        agent.responses.push(AgentResponse::Inference {
+                            app_id: _app_id,
+                            content: response_str.clone(),
+                        });
                         let mut tx = doc.transaction();
                         reconcile(&mut tx, &agent).unwrap();
                         tx.commit();

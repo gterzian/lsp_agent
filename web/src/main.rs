@@ -89,7 +89,8 @@ fn main() {
 
             // Request Doc
             let doc_handle = repo_handle.request_document(doc_id.clone()).await.unwrap();
-            let mut pending_api_requests: VecDeque<RequestAsyncResponder> = VecDeque::new();
+            let mut pending_inference_requests: HashMap<String, VecDeque<RequestAsyncResponder>> =
+                HashMap::new();
 
             let mut api_rx = api_rx;
             let mut backend_rx = backend_rx;
@@ -116,6 +117,7 @@ fn main() {
                                 app_id,
                                 responder,
                             } => {
+                                let app_id_for_queue = app_id.clone();
                                 doc_handle.with_doc_mut(|doc| {
                                     let mut agent: LspAgent = hydrate(doc).unwrap();
                                     agent.requests.push(AgentRequest::Inference {
@@ -126,7 +128,10 @@ fn main() {
                                     reconcile(&mut tx, &agent).unwrap();
                                     tx.commit();
                                 });
-                                pending_api_requests.push_back(responder);
+                                pending_inference_requests
+                                    .entry(app_id_for_queue)
+                                    .or_default()
+                                    .push_back(responder);
                             }
                             ApiRequest::ReadDocument { uri, responder } => {
                                 let content = doc_handle.with_doc_mut(|doc| {
@@ -148,47 +153,70 @@ fn main() {
                         }
                     }
                     _ = doc_handle.changed() => {
-                        let (should_exit, response_enum) = doc_handle.with_doc_mut(|doc| {
-                            let mut agent: LspAgent = hydrate(doc).unwrap();
-                            let resp = if !agent.responses.is_empty() {
-                                Some(agent.responses.remove(0))
-                            } else {
-                                None
+                        let (should_exit, should_handle_response) = doc_handle.with_doc(|doc| {
+                            let agent: LspAgent = hydrate(doc).unwrap();
+                            let handle = match agent.responses.first() {
+                                Some(AgentResponse::Chat(_)) => false,
+                                Some(_) => true,
+                                None => false,
                             };
-
-                            if resp.is_some() {
-                                let mut tx = doc.transaction();
-                                reconcile(&mut tx, &agent).unwrap();
-                                tx.commit();
-                            }
-
-                            (agent.should_exit, resp)
+                            (agent.should_exit, handle)
                         });
 
                         if should_exit {
                             break;
                         }
 
-                        if let Some(resp) = response_enum {
+                        if should_handle_response {
+                            let response_enum = doc_handle.with_doc_mut(|doc| {
+                                let mut agent: LspAgent = hydrate(doc).unwrap();
+                                let resp = if !agent.responses.is_empty() {
+                                    Some(agent.responses.remove(0))
+                                } else {
+                                    None
+                                };
+
+                                if resp.is_some() {
+                                    let mut tx = doc.transaction();
+                                    reconcile(&mut tx, &agent).unwrap();
+                                    tx.commit();
+                                }
+
+                                resp
+                            });
+
+                            if let Some(resp) = response_enum {
                             match resp {
                                 AgentResponse::WebApp { id, content } => {
                                     println!("Received WebApp response in backend!");
                                     let _ = proxy.send_event(AgentEvent::WebApp { id, content });
                                 }
                                 AgentResponse::Chat(_) => {
-                                    println!("Ignoring chat response in web backend.");
+                                    debug_assert!(
+                                        false,
+                                        "Web backend should not consume chat responses"
+                                    );
                                 }
-                                AgentResponse::Inference(content) => {
-                                    if let Some(responder) = pending_api_requests.pop_front() {
-                                        responder.respond(
-                                            http::Response::builder()
-                                            .header("Access-Control-Allow-Origin", "*")
-                                            .body(Vec::from(content)).unwrap()
-                                        );
+                                AgentResponse::Inference { app_id, content } => {
+                                    if let Some(queue) = pending_inference_requests.get_mut(&app_id) {
+                                        if let Some(responder) = queue.pop_front() {
+                                            responder.respond(
+                                                http::Response::builder()
+                                                    .header("Access-Control-Allow-Origin", "*")
+                                                    .body(Vec::from(content))
+                                                    .unwrap(),
+                                            );
+                                            if queue.is_empty() {
+                                                pending_inference_requests.remove(&app_id);
+                                            }
+                                        } else {
+                                            eprintln!("Received Inference response but no pending responder!");
+                                        }
                                     } else {
-                                        eprintln!("Received Inference response but no pending responder!");
+                                        eprintln!("Received Inference response for unknown app id: {}", app_id);
                                     }
                                 }
+                            }
                             }
                         }
                     }
