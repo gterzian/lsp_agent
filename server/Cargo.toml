@@ -15,4 +15,5 @@ clap = { version = "4.5.54", features = ["derive"] }
 futures = "0.3.31"
 uuid = { version = "1.11.0", features = ["serde", "v4"] }
 shared_document = { path = "../shared_document" }
+prompts = { path = "../prompts" }
 axum = "0.7"

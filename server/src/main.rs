@@ -1,7 +1,10 @@
 use automerge_repo::{ConnDirection, DocHandle, Repo};
 use autosurgeon::{hydrate, reconcile};
 use serde::{Deserialize, Serialize};
-use shared_document::{AgentRequest, AgentResponse, DocumentContent, LspAgent, NoStorage, Uri};
+use shared_document::{
+    AgentRequest, AgentResponse, ConversationFragment, DocumentContent, DocumentManager, LspAgent,
+    NoStorage, Uri,
+};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
 use tokio::runtime::Handle;
@@ -10,6 +13,7 @@ use tokio::time::{Duration, sleep};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
+use uuid::Uuid;
 
 struct InferenceLspRequest;
 
@@ -28,6 +32,18 @@ struct InferenceParams {
 #[derive(Serialize, Deserialize, Debug)]
 struct InferenceResult {
     response: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct ToolResponse {
+    action: String,
+    message: Option<String>,
+    app: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ToolRequest {
+    latest_user: String,
 }
 
 enum ShutdownExtension {}
@@ -152,8 +168,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<serde_json::Value>> {
         if params.command == "lsp-agent.log-chat" {
             if let Some(arg) = params.arguments.first().and_then(|v| v.as_str()) {
-                let system_prompt = include_str!("../../prompts/web-environment.md");
-                let request_text = format!("{}\n\n{}", system_prompt, arg);
+                let user_input = arg.to_string();
 
                 let model = params
                     .arguments
@@ -161,19 +176,101 @@ impl LanguageServer for Backend {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
-                self.doc_handle.with_doc_mut(|doc| {
-                    let mut agent: LspAgent = hydrate(doc).unwrap();
-                    if let Some(m) = &model {
-                        agent.active_model = Some(m.clone());
-                    }
-                    agent.requests.push(AgentRequest::Chat {
-                        content: request_text,
-                        model: model.clone(), // Still pass it in the request for immediate use if needed
-                    });
-                    let mut tx = doc.transaction();
-                    reconcile(&mut tx, &agent).unwrap();
-                    tx.commit();
+                let (history, running_apps) = self.doc_handle.with_doc_mut(|doc| {
+                    let agent: LspAgent = hydrate(doc).unwrap();
+                    (
+                        agent.conversation_history.clone(),
+                        collect_apps(&agent.webviews),
+                    )
                 });
+
+                let mut apps_payload: Option<Vec<String>> = None;
+                let mut response_message: Option<String> = None;
+                let mut launched_app: Option<String> = None;
+
+                for _ in 0..3 {
+                    let request_text =
+                        prompts::build_web_request(&history, &user_input, apps_payload.as_deref());
+                    let response_str =
+                        call_inference(&self.client, request_text, model.clone()).await;
+                    let tool_response = parse_tool_response(&response_str);
+
+                    match tool_response.action.as_str() {
+                        "answer" => {
+                            response_message = tool_response.message;
+                            break;
+                        }
+                        "launch_app" => {
+                            launched_app = tool_response.app;
+                            break;
+                        }
+                        "list_apps" => {
+                            if apps_payload.is_some() {
+                                response_message = Some(
+                                    "App list was already provided, but the assistant requested it again without concluding."
+                                        .to_string(),
+                                );
+                                break;
+                            }
+                            apps_payload = Some(running_apps.clone());
+                            continue;
+                        }
+                        _ => {
+                            response_message = Some(response_str);
+                            break;
+                        }
+                    }
+                }
+
+                if launched_app.is_none() && response_message.is_none() {
+                    response_message = Some(
+                        "No actionable response was produced. Please retry or rephrase."
+                            .to_string(),
+                    );
+                }
+
+                if let Some(app) = launched_app {
+                    self.doc_handle.with_doc_mut(|doc| {
+                        let mut agent: LspAgent = hydrate(doc).unwrap();
+                        let app_id = format!("app-{}", Uuid::new_v4());
+                        agent
+                            .webviews
+                            .documents
+                            .insert(app_id.clone(), DocumentContent { text: app.clone() });
+                        agent.responses.push(AgentResponse::WebApp {
+                            id: app_id.clone(),
+                            content: app,
+                        });
+                        if let Some(m) = &model {
+                            agent.active_model = Some(m.clone());
+                        }
+                        let mut tx = doc.transaction();
+                        reconcile(&mut tx, &agent).unwrap();
+                        tx.commit();
+                    });
+
+                    return Ok(None);
+                }
+
+                if let Some(message) = response_message.clone() {
+                    self.doc_handle.with_doc_mut(|doc| {
+                        let mut agent: LspAgent = hydrate(doc).unwrap();
+                        agent
+                            .conversation_history
+                            .push(ConversationFragment::User(user_input.clone()));
+                        agent
+                            .conversation_history
+                            .push(ConversationFragment::Assistant(message.clone()));
+                        if let Some(m) = &model {
+                            agent.active_model = Some(m.clone());
+                        }
+                        let mut tx = doc.transaction();
+                        reconcile(&mut tx, &agent).unwrap();
+                        tx.commit();
+                    });
+
+                    return Ok(Some(serde_json::Value::String(message)));
+                }
             }
 
             self.client
@@ -203,6 +300,47 @@ impl LanguageServer for Backend {
         }
         Ok(None)
     }
+}
+
+async fn call_inference(client: &Client, request: String, model: Option<String>) -> String {
+    let params = InferenceParams { request, model };
+    match client.send_request::<InferenceLspRequest>(params).await {
+        Ok(res) => res.response,
+        Err(e) => {
+            eprintln!("LSP Inference Error: {:?}", e);
+            format!("Error: {:?}", e)
+        }
+    }
+}
+
+fn parse_tool_response(response: &str) -> ToolResponse {
+    match serde_json::from_str::<ToolResponse>(response) {
+        Ok(mut parsed) => {
+            if parsed.action == "answer" && parsed.message.is_none() {
+                parsed.message = Some(response.to_string());
+            }
+            parsed
+        }
+        Err(_) => ToolResponse {
+            action: "answer".to_string(),
+            message: Some(response.to_string()),
+            app: None,
+        },
+    }
+}
+
+fn collect_apps(manager: &DocumentManager) -> Vec<String> {
+    manager
+        .documents
+        .values()
+        .map(|doc| doc.text.clone())
+        .collect()
+}
+
+fn extract_latest_user(request: &str) -> Option<String> {
+    serde_json::from_str::<ToolRequest>(request)
+        .ok()
+        .map(|req| req.latest_user)
 }
 
 const PEER1_PORT: u16 = 2341;
@@ -316,58 +454,121 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
             }
 
             if let Some(req) = pending_request {
-                let (req_str, is_chat, model_hint) = match req {
-                    AgentRequest::Chat { content, model } => (content, true, model),
-                    AgentRequest::Inference(s) => {
+                let (req_str, is_chat, model_hint, _app_id) = match req {
+                    AgentRequest::Chat { content, model } => (content, true, model, String::new()),
+                    AgentRequest::Inference { content, app_id } => {
                         main_task_client
                             .log_message(
                                 MessageType::INFO,
                                 format!(
-                                    "App Inference Request (using active model {:?}): {}",
-                                    active_model, s
+                                    "App Inference Request (using active model {:?}, app {}): {}",
+                                    active_model, app_id, content
                                 ),
                             )
                             .await;
-                        (s, false, active_model.clone())
+                        (content, false, active_model.clone(), app_id)
                     }
                 };
 
-                let response_str = {
-                    let params = InferenceParams {
-                        request: req_str.clone(),
-                        model: model_hint,
-                    };
-                    match main_task_client
-                        .send_request::<InferenceLspRequest>(params)
-                        .await
-                    {
-                        Ok(res) => res.response,
-                        Err(e) => {
-                            eprintln!("LSP Inference Error: {:?}", e);
-                            format!("Error: {:?}", e)
+                if is_chat {
+                    let (history, running_apps) = main_task_doc_handle.with_doc_mut(|doc| {
+                        let agent: LspAgent = hydrate(doc).unwrap();
+                        (
+                            agent.conversation_history.clone(),
+                            collect_apps(&agent.webviews),
+                        )
+                    });
+
+                    let latest_user = extract_latest_user(&req_str).unwrap_or_default();
+                    let mut apps_payload: Option<Vec<String>> = None;
+                    let mut response_message: Option<String> = None;
+                    let mut launched_app: Option<String> = None;
+
+                    for _ in 0..3 {
+                        let request_text = prompts::build_web_request(
+                            &history,
+                            &latest_user,
+                            apps_payload.as_deref(),
+                        );
+                        let tool_response_str =
+                            call_inference(&main_task_client, request_text, model_hint.clone())
+                                .await;
+                        let tool_response = parse_tool_response(&tool_response_str);
+
+                        match tool_response.action.as_str() {
+                            "answer" => {
+                                response_message = tool_response.message;
+                                break;
+                            }
+                            "launch_app" => {
+                                launched_app = tool_response.app;
+                                break;
+                            }
+                            "list_apps" => {
+                                if apps_payload.is_some() {
+                                    response_message = Some(
+                                        "App list was already provided, but the assistant requested it again without concluding."
+                                            .to_string(),
+                                    );
+                                    break;
+                                }
+                                apps_payload = Some(running_apps.clone());
+                                continue;
+                            }
+                            _ => {
+                                response_message = Some(tool_response_str);
+                                break;
+                            }
                         }
                     }
-                };
 
-                main_task_doc_handle.with_doc_mut(|doc| {
-                    let mut agent: LspAgent = hydrate(doc).unwrap();
-                    let response_enum = if is_chat {
-                        AgentResponse::Chat(response_str.clone())
-                    } else {
-                        AgentResponse::Inference(response_str.clone())
-                    };
-                    agent.responses.push(response_enum);
-                    let mut tx = doc.transaction();
-                    reconcile(&mut tx, &agent).unwrap();
-                    tx.commit();
-                });
+                    if launched_app.is_none() && response_message.is_none() {
+                        response_message = Some(
+                            "No actionable response was produced. Please retry or rephrase."
+                                .to_string(),
+                        );
+                    }
 
-                main_task_client
-                    .log_message(
-                        MessageType::INFO,
-                        format!("Chat Response: {}", response_str),
-                    )
-                    .await;
+                    main_task_doc_handle.with_doc_mut(|doc| {
+                        let mut agent: LspAgent = hydrate(doc).unwrap();
+                        if let Some(app) = launched_app {
+                            let app_id = format!("app-{}", Uuid::new_v4());
+                            agent
+                                .webviews
+                                .documents
+                                .insert(app_id.clone(), DocumentContent { text: app.clone() });
+                            agent.responses.push(AgentResponse::WebApp {
+                                id: app_id.clone(),
+                                content: app,
+                            });
+                        } else if let Some(message) = response_message {
+                            if !latest_user.is_empty() {
+                                agent
+                                    .conversation_history
+                                    .push(ConversationFragment::User(latest_user));
+                                agent
+                                    .conversation_history
+                                    .push(ConversationFragment::Assistant(message));
+                            }
+                        }
+                        let mut tx = doc.transaction();
+                        reconcile(&mut tx, &agent).unwrap();
+                        tx.commit();
+                    });
+                } else {
+                    let response_str =
+                        call_inference(&main_task_client, req_str.clone(), model_hint.clone())
+                            .await;
+                    main_task_doc_handle.with_doc_mut(|doc| {
+                        let mut agent: LspAgent = hydrate(doc).unwrap();
+                        agent
+                            .responses
+                            .push(AgentResponse::Inference(response_str.clone()));
+                        let mut tx = doc.transaction();
+                        reconcile(&mut tx, &agent).unwrap();
+                        tx.commit();
+                    });
+                }
             }
         }
     });

@@ -138,16 +138,19 @@ export async function activate(context: ExtensionContext) {
   });
 
   const chatParticipant = chat.createChatParticipant("lsp-agent.chat", async (request, context, response, token) => {
-    response.markdown("Sending request to LSP server...");
     const userPrompt = request.prompt;
     const modelId = request.model.id;
     
     try {
-        await client.sendRequest("workspace/executeCommand", { 
+      const result = await client.sendRequest("workspace/executeCommand", { 
             command: "lsp-agent.log-chat", 
             arguments: [userPrompt, modelId] 
         });
-        response.markdown(`\n\nRequest logged by server.`);
+      if (typeof result === 'string' && result.length > 0) {
+        response.markdown(`\n\n${result}`);
+      } else {
+        response.markdown(`\n\nRequest processed by server.`);
+      }
     } catch (err) {
         response.markdown(`\n\nFailed to send request: ${err}`);
     }

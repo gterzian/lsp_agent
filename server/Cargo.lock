@@ -1089,6 +1089,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "prompts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "shared_document",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1285,6 +1294,7 @@ dependencies = [
  "axum",
  "clap",
  "futures",
+ "prompts",
  "serde",
  "serde_json",
  "shared_document",

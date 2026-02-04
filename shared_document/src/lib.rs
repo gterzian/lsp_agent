@@ -37,13 +37,20 @@ impl Storage for NoStorage {
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
 pub enum AgentRequest {
     Chat { content: String, model: Option<String> },
-    Inference(String),
+    Inference { content: String, app_id: String },
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
 pub enum AgentResponse {
     Chat(String),
     Inference(String),
+    WebApp { id: String, content: String },
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+pub enum ConversationFragment {
+    Assistant(String),
+    User(String),
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
@@ -75,6 +82,7 @@ pub struct LspAgent {
     pub webviews: DocumentManager,
     pub should_exit: bool,
     pub active_model: Option<String>,
+    pub conversation_history: Vec<ConversationFragment>,
 }
 
 impl std::fmt::Display for Id {

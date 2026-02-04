@@ -1,6 +1,6 @@
 use automerge_repo::{ConnDirection, DocumentId, Repo};
 use autosurgeon::{hydrate, reconcile};
-use shared_document::{AgentRequest, AgentResponse, LspAgent, NoStorage};
+use shared_document::{AgentRequest, AgentResponse, ConversationFragment, LspAgent, NoStorage};
 use std::collections::{HashMap, VecDeque};
 use std::thread;
 use tao::event::{Event, WindowEvent};
@@ -16,11 +16,17 @@ const PEER2_PORT: u16 = 2342;
 
 #[derive(Debug)]
 enum AgentEvent {
-    Response(String),
+    WebApp { id: String, content: String },
+}
+
+#[derive(Debug)]
+enum BackendCommand {
+    CloseApp(String),
 }
 
 struct ApiRequest {
     content: String,
+    app_id: String,
     responder: RequestAsyncResponder,
 }
 
@@ -28,7 +34,8 @@ fn main() {
     let event_loop = EventLoopBuilder::<AgentEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
-    let (api_tx, mut api_rx) = mpsc::channel::<ApiRequest>(32);
+    let (api_tx, api_rx) = mpsc::channel::<ApiRequest>(32);
+    let (backend_tx, backend_rx) = mpsc::channel::<BackendCommand>(32);
 
     let backend_handle = thread::spawn(move || {
         let rt = Runtime::new().unwrap();
@@ -78,12 +85,31 @@ fn main() {
             let doc_handle = repo_handle.request_document(doc_id.clone()).await.unwrap();
             let mut pending_api_requests: VecDeque<RequestAsyncResponder> = VecDeque::new();
 
+            let mut api_rx = api_rx;
+            let mut backend_rx = backend_rx;
+
             loop {
                 tokio::select! {
+                    Some(cmd) = backend_rx.recv() => {
+                        let BackendCommand::CloseApp(app_id) = cmd;
+                        doc_handle.with_doc_mut(|doc| {
+                            let mut agent: LspAgent = hydrate(doc).unwrap();
+                            agent.webviews.documents.remove(&app_id);
+                            agent.conversation_history.push(ConversationFragment::Assistant(
+                                format!("App closed: {}", app_id)
+                            ));
+                            let mut tx = doc.transaction();
+                            reconcile(&mut tx, &agent).unwrap();
+                            tx.commit();
+                        });
+                    }
                     Some(req) = api_rx.recv() => {
                         doc_handle.with_doc_mut(|doc| {
                             let mut agent: LspAgent = hydrate(doc).unwrap();
-                            agent.requests.push(AgentRequest::Inference(req.content));
+                            agent.requests.push(AgentRequest::Inference {
+                                content: req.content,
+                                app_id: req.app_id,
+                            });
                             let mut tx = doc.transaction();
                             reconcile(&mut tx, &agent).unwrap();
                             tx.commit();
@@ -114,9 +140,12 @@ fn main() {
 
                         if let Some(resp) = response_enum {
                             match resp {
-                                AgentResponse::Chat(content) => {
-                                    println!("Received Response in backend!");
-                                    let _ = proxy.send_event(AgentEvent::Response(content));
+                                AgentResponse::WebApp { id, content } => {
+                                    println!("Received WebApp response in backend!");
+                                    let _ = proxy.send_event(AgentEvent::WebApp { id, content });
+                                }
+                                AgentResponse::Chat(_) => {
+                                    println!("Ignoring chat response in web backend.");
                                 }
                                 AgentResponse::Inference(content) => {
                                     if let Some(responder) = pending_api_requests.pop_front() {
@@ -137,15 +166,19 @@ fn main() {
         });
     });
 
-    let mut views: HashMap<WindowId, (Window, WebView)> = HashMap::new();
+    let mut views: HashMap<WindowId, (Window, WebView, String)> = HashMap::new();
     let mut backend_handle_opt = Some(backend_handle);
     let api_tx = api_tx.clone();
+    let backend_tx = backend_tx.clone();
 
     event_loop.run(move |event, window_target, control_flow| {
         *control_flow = ControlFlow::Wait;
 
         match event {
-            Event::UserEvent(AgentEvent::Response(content)) => {
+            Event::UserEvent(AgentEvent::WebApp {
+                id: app_id,
+                content,
+            }) => {
                 println!("Received HTML response, creating webview...");
 
                 let window = tao::window::WindowBuilder::new()
@@ -168,11 +201,13 @@ fn main() {
                     .trim();
 
                 let api_tx = api_tx.clone();
+                let app_id_for_requests = app_id.clone();
                 let webview = wry::WebViewBuilder::new()
                     .with_asynchronous_custom_protocol(
                         "wry".into(),
                         move |_webview_id, request, responder| {
                             let api_tx = api_tx.clone();
+                            let app_id_for_requests = app_id_for_requests.clone();
                             let uri = request.uri().clone();
                             let body = request.body().clone();
                             std::thread::spawn(move || {
@@ -185,6 +220,7 @@ fn main() {
                                     );
                                     if let Err(e) = api_tx.blocking_send(ApiRequest {
                                         content: body_str,
+                                        app_id: app_id_for_requests,
                                         responder,
                                     }) {
                                         eprintln!("[Web] Failed to send API request: {}", e);
@@ -212,7 +248,7 @@ fn main() {
                     .build(&window)
                     .unwrap();
 
-                views.insert(id, (window, webview));
+                views.insert(id, (window, webview, app_id));
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -220,7 +256,9 @@ fn main() {
                 ..
             } => {
                 println!("The close button was pressed.");
-                views.remove(&window_id);
+                if let Some((_, _, app_id)) = views.remove(&window_id) {
+                    let _ = backend_tx.blocking_send(BackendCommand::CloseApp(app_id));
+                }
             }
             Event::LoopDestroyed => {
                 if let Some(handle) = backend_handle_opt.take() {
