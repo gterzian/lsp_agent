@@ -36,8 +36,11 @@ export async function activate(context: ExtensionContext) {
 
   // Options to control the language client
   const clientOptions: LanguageClientOptions = {
-    // Register the server for all documents to ensure it activates immediately for testing
-    documentSelector: [{ scheme: 'file', language: '*' }],
+    // Register the server for file and untitled documents to ensure it activates immediately for testing
+    documentSelector: [
+      { scheme: 'file', language: '*' },
+      { scheme: 'untitled', language: '*' }
+    ],
     outputChannel: outputChannel, // <--- Use the same output channel for the server logs
     synchronize: {
       // Notify the server about file changes to '.clientrc files contained in the workspace

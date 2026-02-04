@@ -18,27 +18,43 @@ struct WebRequest<'a> {
     apps: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     apps_note: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_documents: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_document: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    docs_note: Option<&'a str>,
 }
 
 pub fn build_web_request(
     history: &[ConversationFragment],
     latest_user: &str,
     apps: Option<&[String]>,
+    docs: Option<&DocsInfo>,
 ) -> String {
     let request = WebRequest {
         system: WEB_ENVIRONMENT_SYSTEM_PROMPT.trim_end(),
-        history: render_history(history, apps.is_some()),
+        history: render_history(history, apps.is_some(), docs.is_some()),
         latest_user,
         apps,
         apps_note: apps
             .as_ref()
             .map(|_| "The app list below is provided because you requested running apps."),
+        open_documents: docs.map(|info| info.open_documents.as_slice()),
+        active_document: docs.and_then(|info| info.active_document.as_deref()),
+        docs_note: docs
+            .as_ref()
+            .map(|_| "The document list below is provided because you requested open documents."),
     };
 
     serde_json::to_string_pretty(&request).unwrap_or_else(|_| "{}".to_string())
 }
 
-fn render_history(history: &[ConversationFragment], include_apps_marker: bool) -> Vec<HistoryItem> {
+fn render_history(
+    history: &[ConversationFragment],
+    include_apps_marker: bool,
+    include_docs_marker: bool,
+) -> Vec<HistoryItem> {
     let mut items: Vec<HistoryItem> = history
         .iter()
         .map(|fragment| match fragment {
@@ -60,5 +76,18 @@ fn render_history(history: &[ConversationFragment], include_apps_marker: bool) -
         });
     }
 
+    if include_docs_marker {
+        items.push(HistoryItem {
+            role: "assistant",
+            content: "Assistant requested info on open documents.".to_string(),
+        });
+    }
+
     items
+}
+
+#[derive(Serialize, Clone)]
+pub struct DocsInfo {
+    pub open_documents: Vec<String>,
+    pub active_document: Option<String>,
 }

@@ -24,10 +24,16 @@ enum BackendCommand {
     CloseApp(String),
 }
 
-struct ApiRequest {
-    content: String,
-    app_id: String,
-    responder: RequestAsyncResponder,
+enum ApiRequest {
+    Inference {
+        content: String,
+        app_id: String,
+        responder: RequestAsyncResponder,
+    },
+    ReadDocument {
+        uri: String,
+        responder: RequestAsyncResponder,
+    },
 }
 
 fn main() {
@@ -104,17 +110,42 @@ fn main() {
                         });
                     }
                     Some(req) = api_rx.recv() => {
-                        doc_handle.with_doc_mut(|doc| {
-                            let mut agent: LspAgent = hydrate(doc).unwrap();
-                            agent.requests.push(AgentRequest::Inference {
-                                content: req.content,
-                                app_id: req.app_id,
-                            });
-                            let mut tx = doc.transaction();
-                            reconcile(&mut tx, &agent).unwrap();
-                            tx.commit();
-                        });
-                        pending_api_requests.push_back(req.responder);
+                        match req {
+                            ApiRequest::Inference {
+                                content,
+                                app_id,
+                                responder,
+                            } => {
+                                doc_handle.with_doc_mut(|doc| {
+                                    let mut agent: LspAgent = hydrate(doc).unwrap();
+                                    agent.requests.push(AgentRequest::Inference {
+                                        content,
+                                        app_id,
+                                    });
+                                    let mut tx = doc.transaction();
+                                    reconcile(&mut tx, &agent).unwrap();
+                                    tx.commit();
+                                });
+                                pending_api_requests.push_back(responder);
+                            }
+                            ApiRequest::ReadDocument { uri, responder } => {
+                                let content = doc_handle.with_doc_mut(|doc| {
+                                    let agent: LspAgent = hydrate(doc).unwrap();
+                                    agent
+                                        .text_documents
+                                        .documents
+                                        .get(&uri)
+                                        .map(|doc| doc.text.clone())
+                                        .unwrap_or_default()
+                                });
+                                responder.respond(
+                                    http::Response::builder()
+                                        .header("Access-Control-Allow-Origin", "*")
+                                        .body(Vec::from(content))
+                                        .unwrap(),
+                                );
+                            }
+                        }
                     }
                     _ = doc_handle.changed() => {
                         let (should_exit, response_enum) = doc_handle.with_doc_mut(|doc| {
@@ -210,38 +241,54 @@ fn main() {
                             let app_id_for_requests = app_id_for_requests.clone();
                             let uri = request.uri().clone();
                             let body = request.body().clone();
-                            std::thread::spawn(move || {
-                                eprintln!("[Web] Received custom protocol request: {}", uri);
-                                if uri.to_string().contains("inference") {
-                                    let body_str = String::from_utf8_lossy(&body).to_string();
-                                    eprintln!(
-                                        "[Web] Forwarding inference request: {} chars",
-                                        body_str.len()
-                                    );
-                                    if let Err(e) = api_tx.blocking_send(ApiRequest {
-                                        content: body_str,
-                                        app_id: app_id_for_requests,
-                                        responder,
-                                    }) {
-                                        eprintln!("[Web] Failed to send API request: {}", e);
-                                        e.0.responder.respond(
+                            eprintln!("[Web] Received custom protocol request: {}", uri);
+                            if uri.to_string().contains("inference") {
+                                let body_str = String::from_utf8_lossy(&body).to_string();
+                                eprintln!(
+                                    "[Web] Forwarding inference request: {} chars",
+                                    body_str.len()
+                                );
+                                if let Err(e) = api_tx.blocking_send(ApiRequest::Inference {
+                                    content: body_str,
+                                    app_id: app_id_for_requests,
+                                    responder,
+                                }) {
+                                    eprintln!("[Web] Failed to send API request: {}", e);
+                                    if let ApiRequest::Inference { responder, .. } = e.0 {
+                                        responder.respond(
                                             http::Response::builder()
                                                 .status(500)
                                                 .body(Vec::new())
                                                 .unwrap(),
                                         );
                                     }
-                                } else {
-                                    eprintln!("[Web] Unknown URI: {}", uri);
-                                    responder.respond(
-                                        http::Response::builder()
-                                            .header("Access-Control-Allow-Origin", "*")
-                                            .status(404)
-                                            .body(Vec::new())
-                                            .unwrap(),
-                                    );
                                 }
-                            });
+                            } else if uri.to_string().contains("document") {
+                                let body_str = String::from_utf8_lossy(&body).to_string();
+                                if let Err(e) = api_tx.blocking_send(ApiRequest::ReadDocument {
+                                    uri: body_str,
+                                    responder,
+                                }) {
+                                    eprintln!("[Web] Failed to send document request: {}", e);
+                                    if let ApiRequest::ReadDocument { responder, .. } = e.0 {
+                                        responder.respond(
+                                            http::Response::builder()
+                                                .status(500)
+                                                .body(Vec::new())
+                                                .unwrap(),
+                                        );
+                                    }
+                                }
+                            } else {
+                                eprintln!("[Web] Unknown URI: {}", uri);
+                                responder.respond(
+                                    http::Response::builder()
+                                        .header("Access-Control-Allow-Origin", "*")
+                                        .status(404)
+                                        .body(Vec::new())
+                                        .unwrap(),
+                                );
+                            }
                         },
                     )
                     .with_html(clean_content)

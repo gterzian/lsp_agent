@@ -183,14 +183,23 @@ impl LanguageServer for Backend {
                         collect_apps(&agent.webviews),
                     )
                 });
+                let docs_info = self.doc_handle.with_doc_mut(|doc| {
+                    let agent: LspAgent = hydrate(doc).unwrap();
+                    collect_docs(&agent.text_documents)
+                });
 
                 let mut apps_payload: Option<Vec<String>> = None;
+                let mut docs_payload: Option<prompts::DocsInfo> = None;
                 let mut response_message: Option<String> = None;
                 let mut launched_app: Option<String> = None;
 
                 for _ in 0..3 {
-                    let request_text =
-                        prompts::build_web_request(&history, &user_input, apps_payload.as_deref());
+                    let request_text = prompts::build_web_request(
+                        &history,
+                        &user_input,
+                        apps_payload.as_deref(),
+                        docs_payload.as_ref(),
+                    );
                     let response_str =
                         call_inference(&self.client, request_text, model.clone()).await;
                     let tool_response = parse_tool_response(&response_str);
@@ -213,6 +222,17 @@ impl LanguageServer for Backend {
                                 break;
                             }
                             apps_payload = Some(running_apps.clone());
+                            continue;
+                        }
+                        "list_docs" => {
+                            if docs_payload.is_some() {
+                                response_message = Some(
+                                    "Document list was already provided, but the assistant requested it again without concluding."
+                                        .to_string(),
+                                );
+                                break;
+                            }
+                            docs_payload = Some(docs_info.clone());
                             continue;
                         }
                         _ => {
@@ -335,6 +355,24 @@ fn collect_apps(manager: &DocumentManager) -> Vec<String> {
         .values()
         .map(|doc| doc.text.clone())
         .collect()
+}
+
+fn collect_docs(manager: &DocumentManager) -> prompts::DocsInfo {
+    let mut open_documents: Vec<String> = manager.documents.keys().cloned().collect();
+    open_documents.sort();
+    let active_document = manager
+        .active_document
+        .as_ref()
+        .map(|uri| uri.value.clone());
+    if let Some(active) = &active_document {
+        if !open_documents.contains(active) {
+            open_documents.push(active.clone());
+        }
+    }
+    prompts::DocsInfo {
+        open_documents,
+        active_document,
+    }
 }
 
 fn extract_latest_user(request: &str) -> Option<String> {
@@ -478,9 +516,14 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
                             collect_apps(&agent.webviews),
                         )
                     });
+                    let docs_info = main_task_doc_handle.with_doc_mut(|doc| {
+                        let agent: LspAgent = hydrate(doc).unwrap();
+                        collect_docs(&agent.text_documents)
+                    });
 
                     let latest_user = extract_latest_user(&req_str).unwrap_or_default();
                     let mut apps_payload: Option<Vec<String>> = None;
+                    let mut docs_payload: Option<prompts::DocsInfo> = None;
                     let mut response_message: Option<String> = None;
                     let mut launched_app: Option<String> = None;
 
@@ -489,6 +532,7 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
                             &history,
                             &latest_user,
                             apps_payload.as_deref(),
+                            docs_payload.as_ref(),
                         );
                         let tool_response_str =
                             call_inference(&main_task_client, request_text, model_hint.clone())
@@ -513,6 +557,17 @@ fn start_automerge_infrastructure(client: Client) -> (DocHandle, tokio::task::Jo
                                     break;
                                 }
                                 apps_payload = Some(running_apps.clone());
+                                continue;
+                            }
+                            "list_docs" => {
+                                if docs_payload.is_some() {
+                                    response_message = Some(
+                                        "Document list was already provided, but the assistant requested it again without concluding."
+                                            .to_string(),
+                                    );
+                                    break;
+                                }
+                                docs_payload = Some(docs_info.clone());
                                 continue;
                             }
                             _ => {
