@@ -39,10 +39,14 @@ A use case is having the agent write an app that does inference on data with pro
 ## Perhaps Useful Test Cases
 
 - “summarize active doc” with an (untitled) document open.
+- app to fetch and summarize web pages (prevents prompt injection to the main agent).
 - “list open documents” to verify document tracking.
 - “create a simple HTML todo app” to validate web app launch.
 - Basic AI chat web app using inference through the extension.
 - "I want to play tic-tac-toe with an opponent using AI inference."
+
+<img width="1124" height="619" alt="Screenshot 2026-02-05 at 12 19 21 AM" src="https://github.com/user-attachments/assets/6c59e5de-c142-402c-8af3-2f4d5bee9b90" />
+
 
 <img width="1145" height="793" alt="Screenshot 2026-02-04 at 11 19 53 PM" src="https://github.com/user-attachments/assets/14de254f-ef53-4d89-8bc3-d3847e42b3eb" />
 
