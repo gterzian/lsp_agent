@@ -1,6 +1,6 @@
+use agent::{AgentRequest, AgentResponse, ConversationFragment, LspAgent, NoStorage};
 use automerge_repo::{ConnDirection, DocumentId, Repo};
 use autosurgeon::{hydrate, reconcile};
-use shared_document::{AgentRequest, AgentResponse, ConversationFragment, LspAgent, NoStorage};
 use std::collections::{HashMap, VecDeque};
 use std::thread;
 use tao::event::{Event, WindowEvent};

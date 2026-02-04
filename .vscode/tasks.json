@@ -4,7 +4,7 @@
 		{
 			"type": "npm",
 			"script": "compile",
-			"path": "client",
+			"path": "vs_code_lsp/client",
 			"group": "build",
 			"problemMatcher": [
 				"$tsc"
@@ -17,7 +17,7 @@
 			"label": "cargo: build - server",
 			"command": "cargo build",
 			"options": {
-				"cwd": "${workspaceFolder}/server"
+				"cwd": "${workspaceFolder}/vs_code_lsp/server"
 			},
 			"group": "build",
 			"problemMatcher": [

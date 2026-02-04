@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "agent",
+    "traits",
+    "vs_code_lsp/server",
+    "web",
+    "agent/prompts",
+    "agent/shared_document",
+]
+
+[workspace.dependencies]
+automerge = "0.7.3"
+automerge_repo = { version = "0.3.0" }
+autosurgeon = "0.10.1"
+axum = "0.7"
+async-trait = "0.1"
+clap = { version = "4.5.54", features = ["derive"] }
+futures = "0.3.31"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tao = "0.30"
+tokio = { version = "1", features = ["full"] }
+tower-lsp = "0.20"
+uuid = { version = "1.11.0", features = ["serde", "v4"] }
+wry = "0.54.1"
+
+agent = { path = "agent" }
+traits = { path = "traits" }
+prompts = { path = "agent/prompts" }
+shared_document = { path = "agent/shared_document" }

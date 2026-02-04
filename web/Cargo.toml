@@ -4,17 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-automerge_repo = { version = "0.3.0", features = ["tokio"] }
-autosurgeon = "0.10.1"
-automerge = "0.7.3"
-futures = "0.3.31"
-uuid = { version = "1.11.0", features = ["serde", "v4"] }
-shared_document = { path = "../shared_document" }
-reqwest = { version = "0.12", features = ["json"] }
-axum = "0.7"
-clap = { version = "4", features = ["derive"] }
-wry = "0.54.1"
-tao = "0.30"
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+automerge_repo = { workspace = true, features = ["tokio"] }
+autosurgeon = { workspace = true }
+automerge = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+agent = { workspace = true }
+reqwest = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+wry = { workspace = true }
+tao = { workspace = true }

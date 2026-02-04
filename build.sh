@@ -1,11 +1,14 @@
 #!/bin/bash
 set -e
 
+ROOT_DIR=$(cd "$(dirname "$0")" && pwd)
+cd "$ROOT_DIR"
+
 echo "=== Building Rust Server ==="
-cd server
+cd vs_code_lsp/server
 cargo fmt
 cargo build
-cd ..
+cd ../..
 
 echo "=== Building Rust Web Client ==="
 cd web
@@ -14,7 +17,7 @@ cargo build
 cd ..
 
 echo "=== Building TypeScript Client ==="
-cd client
+cd vs_code_lsp/client
 # Only run install if node_modules doesn't exist to save time
 if [ ! -d "node_modules" ]; then
     npm install

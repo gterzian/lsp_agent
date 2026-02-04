@@ -9,10 +9,10 @@
 			"name": "Launch Client",
 			"runtimeExecutable": "${execPath}",
 			"args": [
-				"--extensionDevelopmentPath=${workspaceFolder}/client"
+				"--extensionDevelopmentPath=${workspaceFolder}/vs_code_lsp/client"
 			],
 			"outFiles": [
-				"${workspaceFolder}/client/out/**/*.js"
+				"${workspaceFolder}/vs_code_lsp/client/out/**/*.js"
 			],
 			"preLaunchTask": "npm: compile - client"
 		}

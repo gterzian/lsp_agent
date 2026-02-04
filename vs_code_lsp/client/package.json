@@ -10,7 +10,8 @@
     "Other"
   ],
   "activationEvents": [
-    "*"
+    "*",
+    "onChatParticipant:lsp-agent.chat"
   ],
   "main": "./out/extension.js",
   "contributes": {
