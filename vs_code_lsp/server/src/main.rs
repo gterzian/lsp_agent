@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tower_lsp::jsonrpc::Result as LspResult;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use traits::{Agent, InferenceClient};
+use traits::{InferenceClient, WorkspaceAgent};
 
 struct InferenceLspRequest;
 
@@ -61,7 +61,7 @@ impl InferenceClient for LspAgentClient {
 
 struct Backend {
     client: Client,
-    agent: Box<dyn Agent>,
+    agent: Box<dyn WorkspaceAgent>,
 }
 
 #[tower_lsp::async_trait]

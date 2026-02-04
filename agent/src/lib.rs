@@ -6,7 +6,7 @@ pub use document::{
     LspAgent, NoStorage, Uri,
 };
 
-use automerge_repo::{ConnDirection, DocHandle, Repo};
+use automerge_repo::{ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
 use autosurgeon::{hydrate, reconcile};
 use serde::Deserialize;
 use std::collections::VecDeque;
@@ -14,9 +14,9 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
 use tokio::runtime::Handle;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{mpsc, Mutex, oneshot};
 use tokio::time::{sleep, Duration};
-use traits::{Agent, InferenceClient};
+use traits::{InferenceClient, Web, WebAgent, WorkspaceAgent};
 use uuid::Uuid;
 
 fn find_repo_root(exe_path: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -42,7 +42,7 @@ struct ToolResponse {
     app: Option<String>,
 }
 
-pub fn start_infra(client: Arc<dyn InferenceClient>) -> Box<dyn Agent> {
+pub fn start_infra(client: Arc<dyn InferenceClient>) -> Box<dyn WorkspaceAgent> {
     let pending_chat = Arc::new(Mutex::new(VecDeque::new()));
     let (doc_handle, task) = start_automerge_infrastructure(client, pending_chat.clone());
     let child = spawn_web_client();
@@ -62,8 +62,74 @@ struct AutomergeAgent {
     pending_chat: Arc<Mutex<VecDeque<oneshot::Sender<Option<String>>>>>,
 }
 
+struct DocWebSink {
+    doc_handle: DocHandle,
+}
+
+pub struct DocWebAgent {
+    doc_handle: DocHandle,
+}
+
+impl DocWebAgent {
+    pub fn new(doc_handle: DocHandle) -> Self {
+        Self { doc_handle }
+    }
+}
+
+pub async fn start_web_backend(web: Arc<dyn Web>) -> (Box<dyn WebAgent>, mpsc::Receiver<()>) {
+    let doc_handle = setup_web_doc().await;
+    let agent = DocWebAgent::new(doc_handle.clone());
+    let (exit_tx, exit_rx) = mpsc::channel(1);
+
+    tokio::spawn(async move {
+        loop {
+            if doc_handle.changed().await.is_err() {
+                let _ = exit_tx.send(()).await;
+                break;
+            }
+
+            if handle_web_doc_change(&doc_handle, web.as_ref()).await {
+                let _ = exit_tx.send(()).await;
+                break;
+            }
+        }
+    });
+
+    (Box::new(agent), exit_rx)
+}
+
 #[async_trait::async_trait]
-impl Agent for AutomergeAgent {
+impl Web for DocWebSink {
+    async fn launch_app(&self, id: String, content: String) {
+        self.doc_handle.with_doc_mut(|doc| {
+            let mut agent: LspAgent = hydrate(doc).unwrap();
+            agent
+                .webviews
+                .documents
+                .insert(id.clone(), DocumentContent { text: content.clone() });
+            agent.responses.push(AgentResponse::WebApp {
+                id,
+                content,
+            });
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
+        });
+    }
+
+    async fn handle_inference_response(&self, app_id: String, content: String) {
+        self.doc_handle.with_doc_mut(|doc| {
+            let mut agent: LspAgent = hydrate(doc).unwrap();
+            agent.responses.push(AgentResponse::Inference { app_id, content });
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
+        });
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkspaceAgent for AutomergeAgent {
     async fn shutdown(&self) {
         self.doc_handle.with_doc_mut(|doc| {
             let mut agent: LspAgent = hydrate(doc).unwrap();
@@ -148,6 +214,153 @@ impl Agent for AutomergeAgent {
     }
 }
 
+#[async_trait::async_trait]
+impl WebAgent for DocWebAgent {
+    async fn app_inference_request(&self, content: String, app_id: String) {
+        self.doc_handle.with_doc_mut(|doc| {
+            let mut agent: LspAgent = hydrate(doc).unwrap();
+            agent.requests.push(AgentRequest::Inference { content, app_id });
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
+        });
+    }
+
+    async fn read_document(&self, uri: String) -> String {
+        self.doc_handle.with_doc(|doc| {
+            let agent: LspAgent = hydrate(doc).unwrap();
+            agent
+                .text_documents
+                .documents
+                .get(&uri)
+                .map(|doc| doc.text.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    async fn close_app(&self, app_id: String) {
+        self.doc_handle.with_doc_mut(|doc| {
+            let mut agent: LspAgent = hydrate(doc).unwrap();
+            agent.webviews.documents.remove(&app_id);
+            agent
+                .conversation_history
+                .push(ConversationFragment::Assistant(format!(
+                    "App closed: {}",
+                    app_id
+                )));
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
+        });
+    }
+}
+
+async fn setup_web_doc() -> DocHandle {
+    let repo = Repo::new(None, Box::new(NoStorage));
+    let repo_handle = repo.run();
+    listen_peer2(repo_handle.clone());
+
+    let doc_id = wait_for_doc_id().await;
+    println!("Found Doc ID: {}", doc_id);
+
+    repo_handle.request_document(doc_id.clone()).await.unwrap()
+}
+
+fn listen_peer2(repo_handle: RepoHandle) {
+    let addr = format!("127.0.0.1:{}", PEER2_PORT);
+    tokio::spawn(async move {
+        match TcpListener::bind(&addr).await {
+            Ok(listener) => loop {
+                if let Ok((socket, addr)) = listener.accept().await {
+                    repo_handle
+                        .connect_tokio_io(addr, socket, ConnDirection::Incoming)
+                        .await
+                        .unwrap();
+                }
+            },
+            Err(e) => {
+                eprintln!("Failed to bind Peer 2: {:?}", e);
+            }
+        }
+    });
+}
+
+async fn wait_for_doc_id() -> DocumentId {
+    println!("Waiting for doc_id from HTTP...");
+    let doc_id_str = loop {
+        match reqwest::get("http://127.0.0.1:2348/doc_id").await {
+            Ok(resp) => {
+                if let Ok(text) = resp.text().await {
+                    break text.trim().to_string();
+                }
+            }
+            Err(_) => {
+                sleep(Duration::from_millis(1000)).await;
+            }
+        }
+    };
+
+    doc_id_str.parse().expect("Failed to parse document ID")
+}
+
+async fn handle_web_doc_change(doc_handle: &DocHandle, web: &dyn Web) -> bool {
+    let (should_exit, should_handle_response) = doc_handle.with_doc(|doc| {
+        let agent: LspAgent = hydrate(doc).unwrap();
+        let handle = match agent.responses.first() {
+            Some(AgentResponse::Chat(_)) => false,
+            Some(_) => true,
+            None => false,
+        };
+        (agent.should_exit, handle)
+    });
+
+    if should_exit {
+        return true;
+    }
+
+    if should_handle_response {
+        let response_enum = take_response(doc_handle);
+        if let Some(resp) = response_enum {
+            handle_web_response(web, resp).await;
+        }
+    }
+
+    false
+}
+
+fn take_response(doc_handle: &DocHandle) -> Option<AgentResponse> {
+    doc_handle.with_doc_mut(|doc| {
+        let mut agent: LspAgent = hydrate(doc).unwrap();
+        let resp = if !agent.responses.is_empty() {
+            Some(agent.responses.remove(0))
+        } else {
+            None
+        };
+
+        if resp.is_some() {
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
+        }
+
+        resp
+    })
+}
+
+async fn handle_web_response(web: &dyn Web, resp: AgentResponse) {
+    match resp {
+        AgentResponse::WebApp { id, content } => {
+            web.launch_app(id, content).await;
+        }
+        AgentResponse::Chat(_) => {
+            debug_assert!(false, "Web backend should not consume chat responses");
+        }
+        AgentResponse::Inference { app_id, content } => {
+            web.handle_inference_response(app_id, content).await;
+        }
+    }
+}
+
 fn spawn_web_client() -> Option<Child> {
     let exe_path = std::env::current_exe().expect("Failed to get current exe path");
     let project_root = find_repo_root(&exe_path).unwrap_or_else(|| {
@@ -225,6 +438,9 @@ fn start_automerge_infrastructure(
     });
 
     let main_task_doc_handle = doc_handle.clone();
+    let web_sink: Arc<dyn Web> = Arc::new(DocWebSink {
+        doc_handle: doc_handle.clone(),
+    });
     let main_task_repo_handle = repo_handle1.clone();
     let main_task_client = client.clone();
 
@@ -398,21 +614,6 @@ fn start_automerge_infrastructure(
                         if let Some(model) = model_hint.clone() {
                             agent.active_model = Some(model);
                         }
-                        if let Some(app) = launched_app_for_doc {
-                            let app_id = format!("app-{}", Uuid::new_v4());
-                            agent
-                                .webviews
-                                .documents
-                                .insert(app_id.clone(), DocumentContent { text: app.clone() });
-                            agent.responses.push(AgentResponse::WebApp {
-                                id: app_id.clone(),
-                                content: app,
-                            });
-                            agent.conversation_history.push(ConversationFragment::Assistant(
-                                "App was launched, do you want to perhaps add a message to the user?"
-                                    .to_string(),
-                            ));
-                        }
                         if did_request_apps {
                             agent.conversation_history.push(ConversationFragment::Assistant(
                                 "Assistant requested info on running apps.".to_string(),
@@ -438,6 +639,23 @@ fn start_automerge_infrastructure(
                         tx.commit();
                     });
 
+                    if let Some(app) = launched_app_for_doc {
+                        let app_id = format!("app-{}", Uuid::new_v4());
+                        web_sink
+                            .launch_app(app_id.clone(), app.clone())
+                            .await;
+                        main_task_doc_handle.with_doc_mut(|doc| {
+                            let mut agent: LspAgent = hydrate(doc).unwrap();
+                            agent.conversation_history.push(ConversationFragment::Assistant(
+                                "App was launched, do you want to perhaps add a message to the user?"
+                                    .to_string(),
+                            ));
+                            let mut tx = doc.transaction();
+                            reconcile(&mut tx, &agent).unwrap();
+                            tx.commit();
+                        });
+                    }
+
                     if let Some(message) = response_message {
                         if let Some(sender) = pending_chat_queue.lock().await.pop_front() {
                             let _ = sender.send(Some(message));
@@ -451,16 +669,9 @@ fn start_automerge_infrastructure(
                     let response_str =
                         call_inference(main_task_client.as_ref(), req_str.clone(), model_hint.clone())
                             .await;
-                    main_task_doc_handle.with_doc_mut(|doc| {
-                        let mut agent: LspAgent = hydrate(doc).unwrap();
-                        agent.responses.push(AgentResponse::Inference {
-                            app_id: _app_id,
-                            content: response_str.clone(),
-                        });
-                        let mut tx = doc.transaction();
-                        reconcile(&mut tx, &agent).unwrap();
-                        tx.commit();
-                    });
+                    web_sink
+                        .handle_inference_response(_app_id, response_str.clone())
+                        .await;
                 }
             }
         }

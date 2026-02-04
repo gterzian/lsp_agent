@@ -13,6 +13,8 @@ automerge = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true }
 agent = { workspace = true }
+traits = { workspace = true }
+async-trait = { workspace = true }
 reqwest = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }

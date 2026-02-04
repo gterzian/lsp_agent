@@ -1,18 +1,15 @@
-use agent::{AgentRequest, AgentResponse, ConversationFragment, LspAgent, NoStorage};
-use automerge_repo::{ConnDirection, DocumentId, Repo};
-use autosurgeon::{hydrate, reconcile};
+use agent::start_web_backend;
+use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::thread;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::window::{Window, WindowId};
-use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::sync::{mpsc, Mutex};
+use traits::{Web, WebAgent};
 use wry::{http, RequestAsyncResponder, WebView};
-
-const PEER2_PORT: u16 = 2342;
 
 #[derive(Debug)]
 enum AgentEvent {
@@ -36,6 +33,53 @@ enum ApiRequest {
     },
 }
 
+struct WebRuntime {
+    proxy: tao::event_loop::EventLoopProxy<AgentEvent>,
+    pending_inference_requests: Mutex<HashMap<String, VecDeque<RequestAsyncResponder>>>,
+}
+
+impl WebRuntime {
+    fn new(proxy: tao::event_loop::EventLoopProxy<AgentEvent>) -> Self {
+        Self {
+            proxy,
+            pending_inference_requests: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn enqueue_inference_request(&self, app_id: String, responder: RequestAsyncResponder) {
+        let mut pending = self.pending_inference_requests.lock().await;
+        pending.entry(app_id).or_default().push_back(responder);
+    }
+}
+
+#[async_trait]
+impl Web for WebRuntime {
+    async fn launch_app(&self, id: String, content: String) {
+        let _ = self.proxy.send_event(AgentEvent::WebApp { id, content });
+    }
+
+    async fn handle_inference_response(&self, app_id: String, content: String) {
+        let mut pending = self.pending_inference_requests.lock().await;
+        if let Some(queue) = pending.get_mut(&app_id) {
+            if let Some(responder) = queue.pop_front() {
+                responder.respond(
+                    http::Response::builder()
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(Vec::from(content))
+                        .unwrap(),
+                );
+                if queue.is_empty() {
+                    pending.remove(&app_id);
+                }
+            } else {
+                eprintln!("Received Inference response but no pending responder!");
+            }
+        } else {
+            eprintln!("Received Inference response for unknown app id: {}", app_id);
+        }
+    }
+}
+
 fn spawn_backend_thread(
     api_rx: mpsc::Receiver<ApiRequest>,
     backend_rx: mpsc::Receiver<BackendCommand>,
@@ -54,93 +98,30 @@ async fn run_backend(
 ) {
     println!("Backend thread started...");
 
-    let repo = Repo::new(None, Box::new(NoStorage));
-    let repo_handle = repo.run();
-    listen_peer2(repo_handle.clone());
-
-    let doc_id = wait_for_doc_id().await;
-    println!("Found Doc ID: {}", doc_id);
-
-    let doc_handle = repo_handle.request_document(doc_id.clone()).await.unwrap();
-    let mut pending_inference_requests: HashMap<String, VecDeque<RequestAsyncResponder>> =
-        HashMap::new();
+    let web_runtime = Arc::new(WebRuntime::new(proxy));
+    let (agent, mut exit_rx) = start_web_backend(web_runtime.clone()).await;
 
     loop {
         tokio::select! {
             Some(cmd) = backend_rx.recv() => {
-                handle_backend_command(&doc_handle, cmd);
+                    handle_backend_command(agent.as_ref(), cmd).await;
             }
             Some(req) = api_rx.recv() => {
-                handle_api_request(&doc_handle, req, &mut pending_inference_requests);
+                    handle_api_request(agent.as_ref(), req, web_runtime.as_ref()).await;
             }
-            _ = doc_handle.changed() => {
-                if handle_doc_change(&doc_handle, &proxy, &mut pending_inference_requests) {
-                    break;
-                }
+            _ = exit_rx.recv() => {
+                break;
             }
         }
     }
 }
 
-fn listen_peer2(repo_handle: automerge_repo::RepoHandle) {
-    let addr = format!("127.0.0.1:{}", PEER2_PORT);
-    tokio::spawn(async move {
-        match TcpListener::bind(&addr).await {
-            Ok(listener) => loop {
-                if let Ok((socket, addr)) = listener.accept().await {
-                    repo_handle
-                        .connect_tokio_io(addr, socket, ConnDirection::Incoming)
-                        .await
-                        .unwrap();
-                }
-            },
-            Err(e) => {
-                eprintln!("Failed to bind Peer 2: {:?}", e);
-            }
-        }
-    });
-}
-
-async fn wait_for_doc_id() -> DocumentId {
-    println!("Waiting for doc_id from HTTP...");
-    let doc_id_str = loop {
-        match reqwest::get("http://127.0.0.1:2348/doc_id").await {
-            Ok(resp) => {
-                if let Ok(text) = resp.text().await {
-                    break text.trim().to_string();
-                }
-            }
-            Err(_) => {
-                sleep(Duration::from_millis(1000)).await;
-            }
-        }
-    };
-
-    doc_id_str.parse().expect("Failed to parse document ID")
-}
-
-fn handle_backend_command(doc_handle: &automerge_repo::DocHandle, cmd: BackendCommand) {
+async fn handle_backend_command(agent: &dyn WebAgent, cmd: BackendCommand) {
     let BackendCommand::CloseApp(app_id) = cmd;
-    doc_handle.with_doc_mut(|doc| {
-        let mut agent: LspAgent = hydrate(doc).unwrap();
-        agent.webviews.documents.remove(&app_id);
-        agent
-            .conversation_history
-            .push(ConversationFragment::Assistant(format!(
-                "App closed: {}",
-                app_id
-            )));
-        let mut tx = doc.transaction();
-        reconcile(&mut tx, &agent).unwrap();
-        tx.commit();
-    });
+    agent.close_app(app_id).await;
 }
 
-fn handle_api_request(
-    doc_handle: &automerge_repo::DocHandle,
-    req: ApiRequest,
-    pending_inference_requests: &mut HashMap<String, VecDeque<RequestAsyncResponder>>,
-) {
+async fn handle_api_request(agent: &dyn WebAgent, req: ApiRequest, web_runtime: &WebRuntime) {
     match req {
         ApiRequest::Inference {
             content,
@@ -148,120 +129,19 @@ fn handle_api_request(
             responder,
         } => {
             let app_id_for_queue = app_id.clone();
-            doc_handle.with_doc_mut(|doc| {
-                let mut agent: LspAgent = hydrate(doc).unwrap();
-                agent
-                    .requests
-                    .push(AgentRequest::Inference { content, app_id });
-                let mut tx = doc.transaction();
-                reconcile(&mut tx, &agent).unwrap();
-                tx.commit();
-            });
-            pending_inference_requests
-                .entry(app_id_for_queue)
-                .or_default()
-                .push_back(responder);
+            agent.app_inference_request(content, app_id).await;
+            web_runtime
+                .enqueue_inference_request(app_id_for_queue, responder)
+                .await;
         }
         ApiRequest::ReadDocument { uri, responder } => {
-            let content = doc_handle.with_doc_mut(|doc| {
-                let agent: LspAgent = hydrate(doc).unwrap();
-                agent
-                    .text_documents
-                    .documents
-                    .get(&uri)
-                    .map(|doc| doc.text.clone())
-                    .unwrap_or_default()
-            });
+            let content = agent.read_document(uri).await;
             responder.respond(
                 http::Response::builder()
                     .header("Access-Control-Allow-Origin", "*")
                     .body(Vec::from(content))
                     .unwrap(),
             );
-        }
-    }
-}
-
-fn handle_doc_change(
-    doc_handle: &automerge_repo::DocHandle,
-    proxy: &tao::event_loop::EventLoopProxy<AgentEvent>,
-    pending_inference_requests: &mut HashMap<String, VecDeque<RequestAsyncResponder>>,
-) -> bool {
-    let (should_exit, should_handle_response) = doc_handle.with_doc(|doc| {
-        let agent: LspAgent = hydrate(doc).unwrap();
-        let handle = match agent.responses.first() {
-            Some(AgentResponse::Chat(_)) => false,
-            Some(_) => true,
-            None => false,
-        };
-        (agent.should_exit, handle)
-    });
-
-    if should_exit {
-        return true;
-    }
-
-    if should_handle_response {
-        let response_enum = take_response(doc_handle);
-        if let Some(resp) = response_enum {
-            handle_response(doc_handle, proxy, pending_inference_requests, resp);
-        }
-    }
-
-    false
-}
-
-fn take_response(doc_handle: &automerge_repo::DocHandle) -> Option<AgentResponse> {
-    doc_handle.with_doc_mut(|doc| {
-        let mut agent: LspAgent = hydrate(doc).unwrap();
-        let resp = if !agent.responses.is_empty() {
-            Some(agent.responses.remove(0))
-        } else {
-            None
-        };
-
-        if resp.is_some() {
-            let mut tx = doc.transaction();
-            reconcile(&mut tx, &agent).unwrap();
-            tx.commit();
-        }
-
-        resp
-    })
-}
-
-fn handle_response(
-    _doc_handle: &automerge_repo::DocHandle,
-    proxy: &tao::event_loop::EventLoopProxy<AgentEvent>,
-    pending_inference_requests: &mut HashMap<String, VecDeque<RequestAsyncResponder>>,
-    resp: AgentResponse,
-) {
-    match resp {
-        AgentResponse::WebApp { id, content } => {
-            println!("Received WebApp response in backend!");
-            let _ = proxy.send_event(AgentEvent::WebApp { id, content });
-        }
-        AgentResponse::Chat(_) => {
-            debug_assert!(false, "Web backend should not consume chat responses");
-        }
-        AgentResponse::Inference { app_id, content } => {
-            if let Some(queue) = pending_inference_requests.get_mut(&app_id) {
-                if let Some(responder) = queue.pop_front() {
-                    responder.respond(
-                        http::Response::builder()
-                            .header("Access-Control-Allow-Origin", "*")
-                            .body(Vec::from(content))
-                            .unwrap(),
-                    );
-                    if queue.is_empty() {
-                        pending_inference_requests.remove(&app_id);
-                    }
-                } else {
-                    eprintln!("Received Inference response but no pending responder!");
-                }
-            } else {
-                eprintln!("Received Inference response for unknown app id: {}", app_id);
-            }
         }
     }
 }
