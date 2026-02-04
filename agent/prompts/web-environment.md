@@ -17,11 +17,13 @@ You must return a single JSON object with an `action` field:
 
 3. **Get information on current running apps**
     - `action`: `"list_apps"`
+    - Use this when the user asks about the *running app(s)* or the contents/code of a running app.
     - No additional fields required.
     - This action triggers another inference pass where the app list is included in the request.
 
 4. **Get information on open documents**
     - `action`: `"list_docs"`
+    - Use this only for workspace/editor documents (files), not for running apps.
     - No additional fields required.
     - This action triggers another inference pass where the open document URIs (and active doc) are included in the request.
 
@@ -40,7 +42,7 @@ You will receive a JSON object with these fields:
 - `active_document` (optional): the URI of the active document, if any.
 - `docs_note` (optional): a sentence explaining that the document list is provided because you requested it.
 
-When `apps` or `open_documents` is provided, a history entry will also be present stating that you requested that info. Use this structure to decide which action to take.
+When `apps` is provided, it contains the running app HTML; when `open_documents` is provided, it contains open file URIs. A history entry will also be present stating that you requested that info. Use this structure to decide which action to take.
 
 ## Security Constraint
 

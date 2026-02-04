@@ -1,7 +1,7 @@
 use serde::Serialize;
 use crate::ConversationFragment;
 
-const WEB_ENVIRONMENT_SYSTEM_PROMPT: &str = include_str!("../web-environment.md");
+const WEB_ENVIRONMENT_SYSTEM_PROMPT: &str = include_str!("../prompts/web-environment.md");
 
 #[derive(Serialize)]
 struct HistoryItem {
