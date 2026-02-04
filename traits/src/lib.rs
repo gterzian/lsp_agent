@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 #[async_trait]
-pub trait AgentClient: Send + Sync {
+pub trait InferenceClient: Send + Sync {
     async fn inference(&self, request: String, model: Option<String>) -> Result<String, String>;
     async fn notify_shutdown(&self);
 }

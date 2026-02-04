@@ -1,14 +1,15 @@
-# LSP Agent (pre-alpha)
+# LSP Web Agent
 
-This project is a pre-alpha VS Code extension that uses GitHub Copilot and a Rust LSP server with an agent loop.
+This project is a pre-alpha VS Code extension that runs an agent via an LSP server. Inference goes via GitHub Copilot. The agent can write and launch apps in a webview.
 
-The `@web-agent` chat participant can be prompted to write and launch web apps that do inference through GitHub Copilot and access open documents in VS Code.
+Interaction with the agent goes through the `@web-agent` chat participant.
 
-The agent can answer questions about the code it writes and iterate on it; each iteration launches a new webview.
+The agent can answer questions about the code it writes and iterate on it; each iteration launches a new webview. It can see a list of documents URIs, but cannot read their contents directly.
 
-It can see a list of documents, but cannot read their contents directly.
+The app runs in a standard system webview through [wry](https://docs.rs/wry/latest/wry/), without additional sandboxing.
+The app has access to workspace documents and inference by way of custom protocols.
 
-A use case is having the agent write an app that does inference on data with prompt injection potential.
+The main use case is having the agent write an app that does sub inference on data with prompt injection potential.
 
 ## Requirements
 
@@ -36,7 +37,7 @@ A use case is having the agent write an app that does inference on data with pro
 - `traits`: Shared public interfaces
 - `web`: Web client that renders HTML apps and handles custom protocols
 
-## Perhaps Useful Test Cases
+## Maybe Useful Test Cases
 
 - “summarize active doc” with an (untitled) document open.
 - app to fetch and summarize web pages (prevents prompt injection to the main agent).

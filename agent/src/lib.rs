@@ -16,7 +16,7 @@ use tokio::process::{Child, Command};
 use tokio::runtime::Handle;
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::{sleep, Duration};
-use traits::{Agent, AgentClient};
+use traits::{Agent, InferenceClient};
 use uuid::Uuid;
 
 fn find_repo_root(exe_path: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -42,7 +42,7 @@ struct ToolResponse {
     app: Option<String>,
 }
 
-pub fn start_infra(client: Arc<dyn AgentClient>) -> Box<dyn Agent> {
+pub fn start_infra(client: Arc<dyn InferenceClient>) -> Box<dyn Agent> {
     let pending_chat = Arc::new(Mutex::new(VecDeque::new()));
     let (doc_handle, task) = start_automerge_infrastructure(client, pending_chat.clone());
     let child = spawn_web_client();
@@ -194,7 +194,7 @@ fn spawn_web_client() -> Option<Child> {
 }
 
 fn start_automerge_infrastructure(
-    client: Arc<dyn AgentClient>,
+    client: Arc<dyn InferenceClient>,
     pending_chat: Arc<Mutex<VecDeque<oneshot::Sender<Option<String>>>>>,
 ) -> (DocHandle, tokio::task::JoinHandle<()>) {
     let handle = Handle::current();
@@ -470,7 +470,7 @@ fn start_automerge_infrastructure(
 }
 
 async fn call_inference(
-    client: &dyn AgentClient,
+    client: &dyn InferenceClient,
     request: String,
     model: Option<String>,
 ) -> String {
