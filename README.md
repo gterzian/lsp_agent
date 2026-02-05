@@ -21,13 +21,14 @@ The main use case is having the agent write an app that does sub inference on da
 
 ## Quick Start
 
-1. Download the repo and open it in VS Code.
+1. Git clone the repo and open it in VS Code.
 2. Build everything:
    - `./build.sh`
 3. Run the extension in debug mode:
    - In VS Code, open Run and select “Start debugging”.
 4. Open the Chat view in the debugging window and prompt `@web-agent`.
-5. The model used, both as the main agent and for app inference, is the one you select in the chat.
+5. The model used, both as the main agent and for app inference, is the one you select in the chat(auto defaults to gpt-5-mini).
+6. See [below](https://github.com/gterzian/lsp_agent?tab=readme-ov-file#maybe-useful-test-cases) for prompt ideas.
 
 
 ## Repository Structure
