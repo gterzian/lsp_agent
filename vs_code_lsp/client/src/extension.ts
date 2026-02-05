@@ -105,23 +105,30 @@ export async function activate(context: ExtensionContext) {
       outputChannel.appendLine(`[LSP Agent] Received custom/inference request: ${JSON.stringify(params)}`);
       window.showInformationMessage("Agent Request: " + params.request);
       try {
-          const models = await lm.selectChatModels({
+            const models = await lm.selectChatModels({
               vendor: 'copilot'
-          });
-          
-          let model = models[0];
-          
-          if (params.model) {
+            });
+
+            const defaultModel =
+              models.find(m => m.id.toLowerCase().includes('gpt-5-mini')) ||
+              models.find(m => m.name.toLowerCase().includes('gpt-5 mini')) ||
+              models[0];
+
+            let model = defaultModel;
+
+            if (params.model) {
               outputChannel.appendLine(`[LSP Agent] Requesting specific model: ${params.model}`);
-              model = models.find(m => m.id === params.model) || 
-                      models.find(m => m.name.includes(params.model)) || 
-                      model;
-          } else {
-               model = models.find(m => m.name.includes('GPT-5 mini')) || models[0];
-          }
+              const requested = params.model.trim();
+              if (requested.toLowerCase() !== 'auto') {
+                model =
+                  models.find(m => m.id === requested) ||
+                  models.find(m => m.name.includes(requested)) ||
+                  defaultModel;
+              }
+            }
 
           if (!model) {
-               return { response: "No models available" };
+            return { response: "No models available" };
           }
 
           outputChannel.appendLine(`[LSP Agent] Using model: ${model.name} (${model.id})`);
