@@ -1,10 +1,14 @@
 # LSP Web Agent
 
+An agent that can write and launch web apps from your workspace.
+
 This project is a pre-alpha VS Code extension that runs an agent via an LSP server. Inference goes via GitHub Copilot. The agent can write and launch apps in a webview.
 
 Interaction with the agent goes through the `@web-agent` chat participant.
 
-The agent can answer questions about the code it writes and iterate on it; each iteration launches a new webview. It can see a list of documents URIs, but cannot read their contents directly.
+The agent can answer questions about running apps and the code it writes and iterate on those (for now each iteration launches a new webview).
+
+The agent can also see a list of open document URIs, but cannot read their contents directly. It also doesn't have direct access to the internet. In order to process either local or remote content, it therefore must write a web app and make sub-inference calls. Isolating the main agent from actual content limits prompt injection risk.
 
 The app runs in a standard system webview through [wry](https://docs.rs/wry/latest/wry/), without additional sandboxing.
 The app has access to workspace documents and inference by way of custom protocols.
@@ -22,7 +26,7 @@ The main use case is having the agent write an app that does sub inference on da
    - `./build.sh`
 3. Run the extension in debug mode:
    - In VS Code, open Run and select “Start debugging”.
-4. In the Chat of the debugging window, prompt `@web-agent`.
+4. Open the Chat view in the debugging window and prompt `@web-agent`.
 5. The model used, both as the main agent and for app inference, is the one you select in the chat.
 
 
@@ -63,6 +67,6 @@ Data flow is intentionally split across the process boundary to prevent the webv
 
 ## Ideas for Roadmap
 
-- Persists apps like bookmarks
-- Clearer data boundaries(when a local doc is used in an app, prevent extraction over the internet?)
+- Persist apps like bookmarks
+- Clearer data boundaries (when a local doc is used in an app, prevent extraction over the internet?)
 - Additional sandboxing for the web app?
