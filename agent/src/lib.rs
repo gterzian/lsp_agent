@@ -62,10 +62,18 @@ struct AutomergeAgent {
     pending_chat: Arc<Mutex<VecDeque<oneshot::Sender<Option<String>>>>>,
 }
 
+/// Web sink used in the server process to enqueue web responses into the shared doc.
+///
+/// This does not call any web APIs directly; it only writes `AgentResponse` entries
+/// that the web process will observe and handle.
 struct DocWebSink {
     doc_handle: DocHandle,
 }
 
+/// Web agent used in the web client process to enqueue requests into the shared doc.
+///
+/// The web client cannot call the inference client directly, so it records
+/// `AgentRequest` entries that the server process will consume.
 pub struct DocWebAgent {
     doc_handle: DocHandle,
 }
@@ -76,6 +84,12 @@ impl DocWebAgent {
     }
 }
 
+/// Starts the web backend loop in the web client process.
+///
+/// This connects to the shared document, watches for `AgentResponse` entries,
+/// and forwards them to the provided `Web` implementation (which owns the UI/webview).
+/// It returns a `WebAgent` that writes requests into the shared document for the
+/// server process to handle.
 pub async fn start_web_backend(web: Arc<dyn Web>) -> (Box<dyn WebAgent>, mpsc::Receiver<()>) {
     let doc_handle = setup_web_doc().await;
     let agent = DocWebAgent::new(doc_handle.clone());
@@ -406,6 +420,10 @@ fn spawn_web_client() -> Option<Child> {
     }
 }
 
+/// Starts the server-side infrastructure in the LSP/server process.
+///
+/// This owns the inference client, consumes `AgentRequest` entries from the shared doc,
+/// and writes `AgentResponse` entries that the web client will handle.
 fn start_automerge_infrastructure(
     client: Arc<dyn InferenceClient>,
     pending_chat: Arc<Mutex<VecDeque<oneshot::Sender<Option<String>>>>>,
