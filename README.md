@@ -51,3 +51,7 @@ The main use case is having the agent write an app that does sub inference on da
 
 <img width="1145" height="793" alt="Screenshot 2026-02-04 at 11 19 53 PM" src="https://github.com/user-attachments/assets/14de254f-ef53-4d89-8bc3-d3847e42b3eb" />
 
+## Ideas for Roadmap
+
+- Persists apps like bookmarks
+- Clearer data boundaries(when a local doc is used in an app, prevent extraction over the internet?)
