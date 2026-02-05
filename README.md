@@ -71,4 +71,6 @@ This modular split also makes it possible to swap in other editor front-ends or 
 
 - Persist apps like bookmarks
 - Clearer data boundaries (when a local doc is used in an app, prevent extraction over the internet?)
-- Additional sandboxing for the web app?
+- Additional sandboxing for the web app.
+- Manage apps through a markdown document in the workspace(ai writes state to doc, if user removes app from list: ai closes or deletes app): browser chrome as markdown doc.
+- Endpoint for app to write state to automerge doc.
