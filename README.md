@@ -37,6 +37,16 @@ The main use case is having the agent write an app that does sub inference on da
 - `traits`: Shared public interfaces
 - `web`: Web client that renders HTML apps and handles custom protocols
 
+## Process Architecture
+
+This project runs as multiple processes with a shared Automerge document as the coordination layer.
+
+- **VS Code extension (TypeScript)** spawns the Rust LSP server and forwards editor events.
+- **LSP server (Rust)** hosts the agent core, owns the inference client, and writes requests/responses into the shared document.
+- **Web client (Rust + wry)** runs in a separate process, renders HTML apps, and uses custom `wry://` protocols to request inference or document reads. It never calls inference directly; it writes requests into the shared document and listens for responses.
+
+Data flow is intentionally split across the process boundary to prevent the webview from directly invoking inference or accessing documents without going through the agent’s request/response flow.
+
 ## Maybe Useful Test Cases
 
 - “summarize active doc” with an (untitled) document open.
