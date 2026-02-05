@@ -52,7 +52,7 @@ This project runs as multiple processes with a shared Automerge document as the 
 
 Data flow is intentionally split across the process boundary to prevent the webview from directly invoking inference or accessing documents without going through the agent’s request/response flow.
 
-This modular split also makes it possible to swap in other editor front-ends or alternative web runtimes that speak the same shared-document protocol.
+This modular split also makes it possible to swap in other editor front-ends or alternative web runtimes. Note that using a crdt for communication is an implementation detail and not part of the [interface](https://github.com/gterzian/lsp_agent/blob/main/traits/src/lib.rs).
 
 ## Maybe Useful Test Cases
 
