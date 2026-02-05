@@ -22,7 +22,7 @@ The main use case is having the agent write an app that does sub inference on da
    - `./build.sh`
 3. Run the extension in debug mode:
    - In VS Code, open Run and select “Start debugging”.
-4. Open the Chat view and select the “web-agent” participant.
+4. In the Chat of the debugging window, prompt `@web-agent`.
 5. The model used, both as the main agent and for app inference, is the one you select in the chat.
 
 
