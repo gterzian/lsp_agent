@@ -9,7 +9,6 @@ pub use document::{
 use automerge_repo::{ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
 use autosurgeon::{hydrate, reconcile};
 use serde::Deserialize;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
@@ -43,23 +42,28 @@ struct ToolResponse {
 }
 
 pub fn start_infra(client: Arc<dyn InferenceClient>) -> Box<dyn WorkspaceAgent> {
-    let pending_chat = Arc::new(Mutex::new(VecDeque::new()));
-    let (doc_handle, task) = start_automerge_infrastructure(client, pending_chat.clone());
+    let (doc_handle, task, chat_tx) = start_automerge_infrastructure(client);
     let child = spawn_web_client();
 
     Box::new(AutomergeAgent {
         doc_handle,
         agent_task: Mutex::new(Some(task)),
         web_child: Mutex::new(child),
-        pending_chat,
+        chat_tx,
     })
+}
+
+struct ChatRequest {
+    content: String,
+    model: Option<String>,
+    responder: oneshot::Sender<Option<String>>,
 }
 
 struct AutomergeAgent {
     doc_handle: DocHandle,
     agent_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     web_child: Mutex<Option<Child>>,
-    pending_chat: Arc<Mutex<VecDeque<oneshot::Sender<Option<String>>>>>,
+    chat_tx: mpsc::Sender<ChatRequest>,
 }
 
 /// Web sink used in the server process to enqueue web responses into the shared doc.
@@ -211,19 +215,14 @@ impl WorkspaceAgent for AutomergeAgent {
 
     async fn chat_request(&self, content: String, model: Option<String>) -> Option<String> {
         let (tx, rx) = oneshot::channel();
-        {
-            let mut queue = self.pending_chat.lock().await;
-            queue.push_back(tx);
+        let req = ChatRequest {
+            content,
+            model,
+            responder: tx,
+        };
+        if self.chat_tx.send(req).await.is_err() {
+            return None;
         }
-        self.doc_handle.with_doc_mut(|doc| {
-            let mut agent: LspAgent = hydrate(doc).unwrap();
-            agent
-                .requests
-                .push(AgentRequest::Chat { content, model });
-            let mut tx = doc.transaction();
-            reconcile(&mut tx, &agent).unwrap();
-            tx.commit();
-        });
         rx.await.ok().flatten()
     }
 }
@@ -426,8 +425,7 @@ fn spawn_web_client() -> Option<Child> {
 /// and writes `AgentResponse` entries that the web client will handle.
 fn start_automerge_infrastructure(
     client: Arc<dyn InferenceClient>,
-    pending_chat: Arc<Mutex<VecDeque<oneshot::Sender<Option<String>>>>>,
-) -> (DocHandle, tokio::task::JoinHandle<()>) {
+) -> (DocHandle, tokio::task::JoinHandle<()>, mpsc::Sender<ChatRequest>) {
     let handle = Handle::current();
 
     let repo1 = Repo::new(None, Box::new(NoStorage));
@@ -462,7 +460,7 @@ fn start_automerge_infrastructure(
     let main_task_repo_handle = repo_handle1.clone();
     let main_task_client = client.clone();
 
-    let pending_chat_queue = pending_chat.clone();
+    let (chat_tx, mut chat_rx) = mpsc::channel::<ChatRequest>(32);
     let main_task = handle.spawn(async move {
         let repo_clone1 = main_task_repo_handle.clone();
         tokio::spawn(async move {
@@ -498,46 +496,64 @@ fn start_automerge_infrastructure(
         });
 
         loop {
-            main_task_doc_handle.changed().await.unwrap();
-
-            let (should_exit, pending_request, active_model) =
-                main_task_doc_handle.with_doc_mut(|doc| {
-                    let mut agent: LspAgent = hydrate(doc).unwrap();
-                    let req = if !agent.requests.is_empty() {
-                        Some(agent.requests.remove(0))
-                    } else {
-                        None
-                    };
-
-                    if req.is_some() {
-                        let mut tx = doc.transaction();
-                        reconcile(&mut tx, &agent).unwrap();
-                        tx.commit();
+            tokio::select! {
+                changed = main_task_doc_handle.changed() => {
+                    if changed.is_err() {
+                        break;
                     }
 
-                    (agent.should_exit, req, agent.active_model)
-                });
+                    let (should_exit, pending_request, active_model) =
+                        main_task_doc_handle.with_doc_mut(|doc| {
+                            let mut agent: LspAgent = hydrate(doc).unwrap();
+                            let req = if !agent.requests.is_empty() {
+                                Some(agent.requests.remove(0))
+                            } else {
+                                None
+                            };
 
-            if should_exit {
-                main_task_client.notify_shutdown().await;
-                Handle::current()
-                    .spawn_blocking(|| {
-                        main_task_repo_handle.stop().unwrap();
-                    })
-                    .await
-                    .unwrap();
-                break;
-            }
+                            if req.is_some() {
+                                let mut tx = doc.transaction();
+                                reconcile(&mut tx, &agent).unwrap();
+                                tx.commit();
+                            }
 
-            if let Some(req) = pending_request {
-                let (req_str, is_chat, model_hint, _app_id) = match req {
-                    AgentRequest::Chat { content, model } => (content, true, model, String::new()),
-                    AgentRequest::Inference { content, app_id } => {
-                        (content, false, active_model.clone(), app_id)
+                            (agent.should_exit, req, agent.active_model)
+                        });
+
+                    if should_exit {
+                        main_task_client.notify_shutdown().await;
+                        Handle::current()
+                            .spawn_blocking(|| {
+                                main_task_repo_handle.stop().unwrap();
+                            })
+                            .await
+                            .unwrap();
+                        break;
                     }
-                };
 
-                if is_chat {
+                    if let Some(req) = pending_request {
+                        match req {
+                            AgentRequest::Inference { content, app_id } => {
+                                let response_str = call_inference(
+                                    main_task_client.as_ref(),
+                                    content,
+                                    active_model.clone(),
+                                )
+                                .await;
+                                web_sink
+                                    .handle_inference_response(app_id, response_str.clone())
+                                    .await;
+                            }
+                        }
+                    }
+                }
+                Some(chat_req) = chat_rx.recv() => {
+                    let ChatRequest {
+                        content: latest_user,
+                        model: model_hint,
+                        responder,
+                    } = chat_req;
+
                     let (history, running_apps) = main_task_doc_handle.with_doc(|doc| {
                         let agent: LspAgent = hydrate(doc).unwrap();
                         (
@@ -550,7 +566,6 @@ fn start_automerge_infrastructure(
                         collect_docs(&agent.text_documents)
                     });
 
-                    let latest_user = req_str.clone();
                     let mut apps_payload: Option<Vec<String>> = None;
                     let mut docs_payload: Option<prompts::DocsInfo> = None;
                     let mut response_message: Option<String> = None;
@@ -675,27 +690,21 @@ fn start_automerge_infrastructure(
                     }
 
                     if let Some(message) = response_message {
-                        if let Some(sender) = pending_chat_queue.lock().await.pop_front() {
-                            let _ = sender.send(Some(message));
-                        }
+                        let _ = responder.send(Some(message));
                     } else if did_launch_app || did_nothing {
-                        if let Some(sender) = pending_chat_queue.lock().await.pop_front() {
-                            let _ = sender.send(None);
-                        }
+                        let _ = responder.send(None);
+                    } else {
+                        let _ = responder.send(None);
                     }
-                } else {
-                    let response_str =
-                        call_inference(main_task_client.as_ref(), req_str.clone(), model_hint.clone())
-                            .await;
-                    web_sink
-                        .handle_inference_response(_app_id, response_str.clone())
-                        .await;
+                }
+                else => {
+                    break;
                 }
             }
         }
     });
 
-    (doc_handle, main_task)
+    (doc_handle, main_task, chat_tx)
 }
 
 async fn call_inference(

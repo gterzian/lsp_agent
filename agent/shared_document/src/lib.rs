@@ -36,7 +36,6 @@ impl Storage for NoStorage {
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
 pub enum AgentRequest {
-    Chat { content: String, model: Option<String> },
     Inference { content: String, app_id: String },
 }
 
