@@ -51,6 +51,8 @@ This project runs as multiple processes with a shared Automerge document as the 
 
 Data flow is intentionally split across the process boundary to prevent the webview from directly invoking inference or accessing documents without going through the agent’s request/response flow.
 
+This modular split also makes it possible to swap in other editor front-ends or alternative web runtimes that speak the same shared-document protocol.
+
 ## Maybe Useful Test Cases
 
 - “summarize active doc” with an (untitled) document open.
