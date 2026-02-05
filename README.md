@@ -65,3 +65,4 @@ Data flow is intentionally split across the process boundary to prevent the webv
 
 - Persists apps like bookmarks
 - Clearer data boundaries(when a local doc is used in an app, prevent extraction over the internet?)
+- Additional sandboxing for the web app?
