@@ -10,8 +10,10 @@ The agent can answer questions about running apps and the code it writes and ite
 
 The agent can also see a list of open document URIs, but cannot read their contents directly. It also doesn't have direct access to the internet. In order to process either local or remote content, it therefore must write a web app and make sub-inference calls. Isolating the main agent from actual content limits prompt injection risk.
 
+The agent can also see a list of values stored by apps. Apps can store and retrieve values from a shared key-value store, and get notified when those change, enabling persistence and data sharing between apps.
+
 The app runs in a standard system webview through [wry](https://docs.rs/wry/latest/wry/), without additional sandboxing.
-The app has access to workspace documents and inference by way of custom protocols.
+The app has access to workspace documents, inference, and the shared key-value store by way of custom protocols.
 
 The main use case is having the agent write an app that does sub inference on data with prompt injection potential.
 
@@ -47,12 +49,20 @@ The main use case is having the agent write an app that does sub inference on da
 This project runs as multiple processes with a shared Automerge document as the coordination layer.
 
 - **VS Code extension (TypeScript)** spawns the Rust LSP server and forwards editor events.
-- **LSP server (Rust)** hosts the agent core, owns the inference client, and writes requests/responses into the shared document.
-- **Web client (Rust + wry)** runs in a separate process, renders HTML apps, and uses custom `wry://` protocols to request inference or document reads. It never calls inference directly; it writes requests into the shared document and listens for responses.
+- **LSP server (Rust)** hosts the agent core, owns the inference client, and manages the shared document (including requests/responses and stored values).
+- **Web client (Rust + wry)** runs in a separate process, renders HTML apps, and uses custom `wry://` protocols to request inference, read documents, or access stored values. It never calls inference directly; it writes requests into the shared document and listens for responses.
 
 Data flow is intentionally split across the process boundary to prevent the webview from directly invoking inference or accessing documents without going through the agent’s request/response flow.
 
 This modular split also makes it possible to swap in other editor front-ends or alternative web runtimes. Note that using a crdt for communication is an implementation detail and not part of the [interface](https://github.com/gterzian/lsp_agent/blob/main/traits/src/lib.rs).
+
+### Design Principles
+
+The architecture prioritizes **security** and **state synchronization**:
+
+- **Strong Sandboxing**: By splitting the system into a privileged Server and an unprivileged Web Client, we create a hard security boundary. The Web Client (running AI-generated apps) cannot call inference or read files directly. It must request these actions via the shared document, allowing the Server to act as a gatekeeper against prompt injection.
+- **CRDTs as the Communication Bus**: Using **Automerge** creates a "shared brain" where the state (open docs, chat history, app state) is unified. This decouples the processes—the Web process simply updates the state to request inference, and the Server updates it to provide the response. This also simplifies persistence.
+- **Thin LSP Server**: The server mostly translates VS Code events into shared document updates, keeping protocol logic clean and separating editor integration from agent intelligence.
 
 ## Maybe Useful Test Cases
 
@@ -62,6 +72,9 @@ This modular split also makes it possible to swap in other editor front-ends or 
 - “create a simple HTML todo app” to validate web app launch.
 - Basic AI chat web app using inference through the extension.
 - "I want to play tic-tac-toe with an opponent using AI inference."
+- Tic-tac-toe game storing scoreboard; another app showing live schore.
+- "Create a note taking app that persists notes."
+- "list stored values" to see what data has been persisted by apps.
 
 <img width="1124" height="619" alt="Screenshot 2026-02-05 at 12 19 21 AM" src="https://github.com/user-attachments/assets/6c59e5de-c142-402c-8af3-2f4d5bee9b90" />
 
