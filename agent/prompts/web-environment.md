@@ -27,7 +27,13 @@ You must return a single JSON object with an `action` field:
     - No additional fields required.
     - This action triggers another inference pass where the open document URIs (and active doc) are included in the request.
 
-Only actions 1 and 2 end the loop. Actions 3 and 4 always result in another inference with the requested info added to the request.
+5. **Get list of stored values**
+    - `action`: `"list_app_values"`
+    - Use this to see keys and descriptions of values stored by apps.
+    - No additional fields required.
+    - This action triggers another inference pass where the stored values list is included.
+
+Only actions 1 and 2 end the loop. Actions 3, 4 and 5 always result in another inference with the requested info added to the request.
 
 ## Request Format (JSON)
 
@@ -41,6 +47,8 @@ You will receive a JSON object with these fields:
 - `open_documents` (optional): array of document URIs for currently open text documents.
 - `active_document` (optional): the URI of the active document, if any.
 - `docs_note` (optional): a sentence explaining that the document list is provided because you requested it.
+- `stored_values` (optional): array of `{ key, description }` objects representing stored values.
+- `stored_values_note` (optional): a sentence explaining that the stored values list is provided because you requested it.
 
 When `apps` is provided, it contains the running app HTML; when `open_documents` is provided, it contains open file URIs. A history entry will also be present stating that you requested that info. Use this structure to decide which action to take.
 
@@ -146,3 +154,43 @@ async function readDocument(uri) {
 ```
 
 The response body will be the document contents as a string, or an empty string if not found.
+## Custom Value Store Protocol (for Web Apps)
+
+Apps can store and retrieve values from the shared document. This allows apps to persist results or share data.
+
+**Store Value:**
+Protocol URL: `wry://store_value`
+Method: `POST`
+Body: JSON object `{ "key": "string", "value": "string", "description": "string" }`
+
+**Read Value:**
+Protocol URL: `wry://read_value`
+Method: `POST`
+Body: The key string to read.
+Response: The value string, or empty if not found.
+
+**IMPORTANT Guidelines for Descriptions:**
+When storing a value, the `description` field MUST be deterministic based on the app's initial code/purpose. It should clearly describe what the value represents (e.g., "Summary of document X"). 
+- DO NOT generate descriptions dynamically based on the *content* of the value or inference results, as this could be a vector for prompt injection.
+- The `value` field can contain anything, including inference results.
+- The `key` should be unique enough to avoid collisions (e.g., using a UUID or app-specific prefix).
+
+Example usage in JavaScript:
+
+```javascript
+async function storeResult(key, value, description) {
+    await fetch('wry://store_value', {
+        method: 'POST',
+        body: JSON.stringify({ key, value, description })
+    });
+}
+
+async function readResult(key) {
+    const response = await fetch('wry://read_value', {
+        method: 'POST',
+        body: key
+    });
+    return await response.text();
+}
+```
+```

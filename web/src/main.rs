@@ -11,6 +11,8 @@ use tokio::sync::{mpsc, Mutex};
 use traits::{Web, WebAgent};
 use wry::{http, RequestAsyncResponder, WebView};
 
+use serde::Deserialize;
+
 #[derive(Debug)]
 enum AgentEvent {
     WebApp { id: String, content: String },
@@ -21,6 +23,13 @@ enum BackendCommand {
     CloseApp(String),
 }
 
+#[derive(Deserialize)]
+struct StoreValueBody {
+    key: String,
+    value: String,
+    description: String,
+}
+
 enum ApiRequest {
     Inference {
         content: String,
@@ -29,6 +38,16 @@ enum ApiRequest {
     },
     ReadDocument {
         uri: String,
+        responder: RequestAsyncResponder,
+    },
+    StoreValue {
+        key: String,
+        value: String,
+        description: String,
+        responder: RequestAsyncResponder,
+    },
+    ReadValue {
+        key: String,
         responder: RequestAsyncResponder,
     },
 }
@@ -143,6 +162,31 @@ async fn handle_api_request(agent: &dyn WebAgent, req: ApiRequest, web_runtime: 
                     .unwrap(),
             );
         }
+        ApiRequest::StoreValue {
+            key,
+            value,
+            description,
+            responder,
+        } => {
+            agent.store_value(key, value, description).await;
+            responder.respond(
+                http::Response::builder()
+                    .header("Access-Control-Allow-Origin", "*")
+                    .status(200)
+                    .body(Vec::new())
+                    .unwrap(),
+            );
+        }
+        ApiRequest::ReadValue { key, responder } => {
+            let value = agent.read_value(key).await;
+            let body = value.unwrap_or_default();
+            responder.respond(
+                http::Response::builder()
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(Vec::from(body))
+                    .unwrap(),
+            );
+        }
     }
 }
 
@@ -229,6 +273,57 @@ fn main() {
                                 }) {
                                     eprintln!("[Web] Failed to send document request: {}", e);
                                     if let ApiRequest::ReadDocument { responder, .. } = e.0 {
+                                        responder.respond(
+                                            http::Response::builder()
+                                                .status(500)
+                                                .body(Vec::new())
+                                                .unwrap(),
+                                        );
+                                    }
+                                }
+                            } else if uri.to_string().contains("store_value") {
+                                let body_str = String::from_utf8_lossy(&body).to_string();
+                                match serde_json::from_str::<StoreValueBody>(&body_str) {
+                                    Ok(parsed) => {
+                                        if let Err(e) =
+                                            api_tx.blocking_send(ApiRequest::StoreValue {
+                                                key: parsed.key,
+                                                value: parsed.value,
+                                                description: parsed.description,
+                                                responder,
+                                            })
+                                        {
+                                            eprintln!(
+                                                "[Web] Failed to send store_value request: {}",
+                                                e
+                                            );
+                                            if let ApiRequest::StoreValue { responder, .. } = e.0 {
+                                                responder.respond(
+                                                    http::Response::builder()
+                                                        .status(500)
+                                                        .body(Vec::new())
+                                                        .unwrap(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[Web] Failed to parse store_value body: {}", e);
+                                        responder.respond(
+                                            http::Response::builder()
+                                                .status(400)
+                                                .body(Vec::new())
+                                                .unwrap(),
+                                        );
+                                    }
+                                }
+                            } else if uri.to_string().contains("read_value") {
+                                let key = String::from_utf8_lossy(&body).to_string();
+                                if let Err(e) =
+                                    api_tx.blocking_send(ApiRequest::ReadValue { key, responder })
+                                {
+                                    eprintln!("[Web] Failed to send read_value request: {}", e);
+                                    if let ApiRequest::ReadValue { responder, .. } = e.0 {
                                         responder.respond(
                                             http::Response::builder()
                                                 .status(500)

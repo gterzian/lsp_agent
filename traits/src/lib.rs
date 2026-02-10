@@ -26,6 +26,8 @@ pub trait WebAgent: Send + Sync {
     async fn app_inference_request(&self, content: String, app_id: String);
     async fn read_document(&self, uri: String) -> String;
     async fn close_app(&self, app_id: String);
+    async fn store_value(&self, key: String, value: String, description: String);
+    async fn read_value(&self, key: String) -> Option<String>;
 }
 
 /// Web UI bridge used to apply responses from the shared document to the webview.

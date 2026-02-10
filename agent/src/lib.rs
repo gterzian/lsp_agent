@@ -3,7 +3,7 @@ pub mod prompts;
 
 pub use document::{
     AgentRequest, AgentResponse, ConversationFragment, DocumentContent, DocumentManager, Id,
-    LspAgent, NoStorage, Uri,
+    LspAgent, NoStorage, StoredValue, Uri,
 };
 
 use automerge_repo::{ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
@@ -265,6 +265,25 @@ impl WebAgent for DocWebAgent {
             reconcile(&mut tx, &agent).unwrap();
             tx.commit();
         });
+    }
+
+    async fn store_value(&self, key: String, value: String, description: String) {
+        self.doc_handle.with_doc_mut(|doc| {
+            let mut agent: LspAgent = hydrate(doc).unwrap();
+            agent
+                .stored_values
+                .insert(key, StoredValue { value, description });
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
+        });
+    }
+
+    async fn read_value(&self, key: String) -> Option<String> {
+        self.doc_handle.with_doc(|doc| {
+            let agent: LspAgent = hydrate(doc).unwrap();
+            agent.stored_values.get(&key).map(|v| v.value.clone())
+        })
     }
 }
 
@@ -594,22 +613,21 @@ async fn handle_chat_request(
         responder,
     } = chat_req;
 
-    let (mut history, running_apps) = doc_handle.with_doc(|doc| {
+    let (mut history, running_apps, docs_info, stored_values_info) = doc_handle.with_doc(|doc| {
         let agent: LspAgent = hydrate(doc).unwrap();
         (
             agent.conversation_history.clone(),
             collect_apps(&agent.webviews),
+            collect_docs(&agent.text_documents),
+            collect_stored_values(&agent.stored_values),
         )
-    });
-    let docs_info = doc_handle.with_doc(|doc| {
-        let agent: LspAgent = hydrate(doc).unwrap();
-        collect_docs(&agent.text_documents)
     });
 
     let initial_history_len = history.len();
 
     let mut apps_payload: Option<Vec<String>> = None;
     let mut docs_payload: Option<prompts::DocsInfo> = None;
+    let mut stored_values_payload: Option<Vec<prompts::StoredValueInfo>> = None;
     let mut response_message: Option<String> = None;
     let mut launched_app: Option<String> = None;
     let mut did_nothing = false;
@@ -628,11 +646,14 @@ async fn handle_chat_request(
             &current_prompt_user,
             apps_payload.as_deref(),
             docs_payload.as_ref(),
+            stored_values_payload.as_deref(),
         );
         let tool_response_str =
             call_inference(client.as_ref(), request_text, model_hint.clone())
                 .await;
         let tool_response = parse_tool_response(&tool_response_str);
+
+        let mut next_turn_reason: Option<String> = None;
 
         match tool_response.action.as_str() {
             "answer" => {
@@ -656,15 +677,7 @@ async fn handle_chat_request(
                     break;
                 }
                 apps_payload = Some(running_apps.clone());
-                if !pushed_user_message && !current_prompt_user.is_empty() {
-                    history.push(ConversationFragment::User(current_prompt_user.clone()));
-                    current_prompt_user.clear();
-                    pushed_user_message = true;
-                }
-                history.push(ConversationFragment::Assistant(
-                    "Assistant requested info on running apps.".to_string(),
-                ));
-                continue;
+                next_turn_reason = Some("Assistant requested info on running apps.".to_string());
             }
             "list_docs" => {
                 if docs_payload.is_some() {
@@ -675,19 +688,32 @@ async fn handle_chat_request(
                     break;
                 }
                 docs_payload = Some(docs_info.clone());
-                if !pushed_user_message && !current_prompt_user.is_empty() {
-                    history.push(ConversationFragment::User(current_prompt_user.clone()));
-                    current_prompt_user.clear();
-                    pushed_user_message = true;
+                next_turn_reason = Some("Assistant requested info on open documents.".to_string());
+            }
+            "list_app_values" => {
+                if stored_values_payload.is_some() {
+                    response_message = Some(
+                        "Stored values list was already provided, but the assistant requested it again without concluding."
+                            .to_string(),
+                    );
+                    break;
                 }
-                history.push(ConversationFragment::Assistant(
-                    "Assistant requested info on open documents.".to_string(),
-                ));
-                continue;
+                stored_values_payload = Some(stored_values_info.clone());
+                next_turn_reason = Some("Assistant requested info on stored values.".to_string());
             }
             _ => {
                 response_message = Some(tool_response_str);
             }
+        }
+
+        if let Some(reason) = next_turn_reason {
+            if !pushed_user_message && !current_prompt_user.is_empty() {
+                history.push(ConversationFragment::User(current_prompt_user.clone()));
+                current_prompt_user.clear();
+                pushed_user_message = true;
+            }
+            history.push(ConversationFragment::Assistant(reason));
+            continue;
         }
     }
 
@@ -805,4 +831,16 @@ fn collect_docs(manager: &DocumentManager) -> prompts::DocsInfo {
         open_documents,
         active_document,
     }
+}
+
+fn collect_stored_values(
+    values: &std::collections::HashMap<String, StoredValue>,
+) -> Vec<prompts::StoredValueInfo> {
+    values
+        .iter()
+        .map(|(k, v)| prompts::StoredValueInfo {
+            key: k.clone(),
+            description: v.description.clone(),
+        })
+        .collect()
 }

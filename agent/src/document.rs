@@ -74,6 +74,12 @@ pub struct DocumentManager {
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
+pub struct StoredValue {
+    pub value: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
 pub struct LspAgent {
     pub requests: Vec<AgentRequest>,
     pub responses: Vec<AgentResponse>,
@@ -82,6 +88,7 @@ pub struct LspAgent {
     pub should_exit: bool,
     pub active_model: Option<String>,
     pub conversation_history: Vec<ConversationFragment>,
+    pub stored_values: HashMap<String, StoredValue>,
 }
 
 impl std::fmt::Display for Id {

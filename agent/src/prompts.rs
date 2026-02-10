@@ -24,6 +24,10 @@ struct WebRequest<'a> {
     active_document: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     docs_note: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stored_values: Option<&'a [StoredValueInfo]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stored_values_note: Option<&'a str>,
 }
 
 pub fn build_web_request(
@@ -31,6 +35,7 @@ pub fn build_web_request(
     latest_user: &str,
     apps: Option<&[String]>,
     docs: Option<&DocsInfo>,
+    stored_values: Option<&[StoredValueInfo]>,
 ) -> String {
     let request = WebRequest {
         system: WEB_ENVIRONMENT_SYSTEM_PROMPT.trim_end(),
@@ -45,6 +50,10 @@ pub fn build_web_request(
         docs_note: docs
             .as_ref()
             .map(|_| "The document list below is provided because you requested open documents."),
+        stored_values,
+        stored_values_note: stored_values
+            .as_ref()
+            .map(|_| "The stored values list below is provided because you requested it."),
     };
 
     serde_json::to_string_pretty(&request).unwrap_or_else(|_| "{}".to_string())
@@ -90,4 +99,10 @@ fn render_history(
 pub struct DocsInfo {
     pub open_documents: Vec<String>,
     pub active_document: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct StoredValueInfo {
+    pub key: String,
+    pub description: String,
 }
