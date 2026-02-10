@@ -34,7 +34,7 @@ pub fn build_web_request(
 ) -> String {
     let request = WebRequest {
         system: WEB_ENVIRONMENT_SYSTEM_PROMPT.trim_end(),
-        history: render_history(history, apps.is_some(), docs.is_some()),
+        history: render_history(history, false, false),
         latest_user,
         apps,
         apps_note: apps

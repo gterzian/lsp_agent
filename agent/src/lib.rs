@@ -462,38 +462,7 @@ fn start_automerge_infrastructure(
 
     let (chat_tx, mut chat_rx) = mpsc::channel::<ChatRequest>(32);
     let main_task = handle.spawn(async move {
-        let repo_clone1 = main_task_repo_handle.clone();
-        tokio::spawn(async move {
-            let addr1 = format!("127.0.0.1:{}", PEER1_PORT);
-            let listener = TcpListener::bind(addr1).await.unwrap();
-            loop {
-                if let Ok((socket, addr)) = listener.accept().await {
-                    repo_clone1
-                        .connect_tokio_io(addr, socket, ConnDirection::Incoming)
-                        .await
-                        .unwrap();
-                }
-            }
-        });
-
-        let repo_clone1 = main_task_repo_handle.clone();
-        tokio::spawn(async move {
-            let addr = format!("127.0.0.1:{}", PEER2_PORT);
-            loop {
-                match TcpStream::connect(&addr).await {
-                    Ok(stream) => {
-                        repo_clone1
-                            .connect_tokio_io(addr, stream, ConnDirection::Outgoing)
-                            .await
-                            .unwrap();
-                        break;
-                    }
-                    Err(_) => {
-                        sleep(Duration::from_millis(500)).await;
-                    }
-                }
-            }
-        });
+        spawn_peer_connections(main_task_repo_handle.clone());
 
         loop {
             tokio::select! {
@@ -502,200 +471,19 @@ fn start_automerge_infrastructure(
                         break;
                     }
 
-                    let (should_exit, pending_request, active_model) =
-                        main_task_doc_handle.with_doc_mut(|doc| {
-                            let mut agent: LspAgent = hydrate(doc).unwrap();
-                            let req = if !agent.requests.is_empty() {
-                                Some(agent.requests.remove(0))
-                            } else {
-                                None
-                            };
-
-                            if req.is_some() {
-                                let mut tx = doc.transaction();
-                                reconcile(&mut tx, &agent).unwrap();
-                                tx.commit();
-                            }
-
-                            (agent.should_exit, req, agent.active_model)
-                        });
+                    let (should_exit, pending_request, active_model) = check_agent_state(&main_task_doc_handle);
 
                     if should_exit {
-                        main_task_client.notify_shutdown().await;
-                        Handle::current()
-                            .spawn_blocking(|| {
-                                main_task_repo_handle.stop().unwrap();
-                            })
-                            .await
-                            .unwrap();
+                        perform_shutdown(&main_task_client, &main_task_repo_handle).await;
                         break;
                     }
 
                     if let Some(req) = pending_request {
-                        match req {
-                            AgentRequest::Inference { content, app_id } => {
-                                let response_str = call_inference(
-                                    main_task_client.as_ref(),
-                                    content,
-                                    active_model.clone(),
-                                )
-                                .await;
-                                web_sink
-                                    .handle_inference_response(app_id, response_str.clone())
-                                    .await;
-                            }
-                        }
+                        handle_inference_request(req, &main_task_client, active_model, web_sink.as_ref()).await;
                     }
                 }
                 Some(chat_req) = chat_rx.recv() => {
-                    let ChatRequest {
-                        content: latest_user,
-                        model: model_hint,
-                        responder,
-                    } = chat_req;
-
-                    let (history, running_apps) = main_task_doc_handle.with_doc(|doc| {
-                        let agent: LspAgent = hydrate(doc).unwrap();
-                        (
-                            agent.conversation_history.clone(),
-                            collect_apps(&agent.webviews),
-                        )
-                    });
-                    let docs_info = main_task_doc_handle.with_doc(|doc| {
-                        let agent: LspAgent = hydrate(doc).unwrap();
-                        collect_docs(&agent.text_documents)
-                    });
-
-                    let mut apps_payload: Option<Vec<String>> = None;
-                    let mut docs_payload: Option<prompts::DocsInfo> = None;
-                    let mut response_message: Option<String> = None;
-                    let mut launched_app: Option<String> = None;
-                    let mut did_nothing = false;
-
-                    let max_iterations = std::env::var("LSP_AGENT_TOOL_MAX_ITERATIONS")
-                        .ok()
-                        .and_then(|value| value.parse::<usize>().ok())
-                        .unwrap_or(DEFAULT_TOOL_MAX_ITERATIONS);
-
-                    for _ in 0..max_iterations {
-                        let request_text = prompts::build_web_request(
-                            &history,
-                            &latest_user,
-                            apps_payload.as_deref(),
-                            docs_payload.as_ref(),
-                        );
-                        let tool_response_str =
-                            call_inference(main_task_client.as_ref(), request_text, model_hint.clone())
-                                .await;
-                        let tool_response = parse_tool_response(&tool_response_str);
-
-                        match tool_response.action.as_str() {
-                            "answer" => {
-                                response_message = tool_response.message;
-                                break;
-                            }
-                            "nothing" => {
-                                did_nothing = true;
-                                break;
-                            }
-                            "launch_app" => {
-                                launched_app = tool_response.app;
-                                break;
-                            }
-                            "list_apps" => {
-                                if apps_payload.is_some() {
-                                    response_message = Some(
-                                        "App list was already provided, but the assistant requested it again without concluding."
-                                            .to_string(),
-                                    );
-                                    break;
-                                }
-                                apps_payload = Some(running_apps.clone());
-                                continue;
-                            }
-                            "list_docs" => {
-                                if docs_payload.is_some() {
-                                    response_message = Some(
-                                        "Document list was already provided, but the assistant requested it again without concluding."
-                                            .to_string(),
-                                    );
-                                    break;
-                                }
-                                docs_payload = Some(docs_info.clone());
-                                continue;
-                            }
-                            _ => {
-                                response_message = Some(tool_response_str);
-                            }
-                        }
-                    }
-
-                    if !did_nothing && launched_app.is_none() && response_message.is_none() {
-                        response_message = Some(
-                            "No actionable response was produced. Please retry or rephrase."
-                                .to_string(),
-                        );
-                    }
-
-                    let launched_app_for_doc = launched_app.clone();
-                    let did_launch_app = launched_app.is_some();
-                    let did_request_docs = docs_payload.is_some();
-                    let did_request_apps = apps_payload.is_some();
-
-                    main_task_doc_handle.with_doc_mut(|doc| {
-                        let mut agent: LspAgent = hydrate(doc).unwrap();
-                        if let Some(model) = model_hint.clone() {
-                            agent.active_model = Some(model);
-                        }
-                        if did_request_apps {
-                            agent.conversation_history.push(ConversationFragment::Assistant(
-                                "Assistant requested info on running apps.".to_string(),
-                            ));
-                        }
-                        if did_request_docs {
-                            agent.conversation_history.push(ConversationFragment::Assistant(
-                                "Assistant requested info on open documents.".to_string(),
-                            ));
-                        }
-                        if let Some(message) = response_message.clone() {
-                            if !latest_user.is_empty() {
-                                agent
-                                    .conversation_history
-                                    .push(ConversationFragment::User(latest_user));
-                                agent
-                                    .conversation_history
-                                    .push(ConversationFragment::Assistant(message));
-                            }
-                        }
-                        let mut tx = doc.transaction();
-                        reconcile(&mut tx, &agent).unwrap();
-                        tx.commit();
-                    });
-
-                    if let Some(app) = launched_app_for_doc {
-                        let app_id = format!("app-{}", Uuid::new_v4());
-                        web_sink
-                            .launch_app(app_id.clone(), app.clone())
-                            .await;
-                        main_task_doc_handle.with_doc_mut(|doc| {
-                            let mut agent: LspAgent = hydrate(doc).unwrap();
-                            agent.conversation_history.push(ConversationFragment::Assistant(
-                                "App was launched, do you want to perhaps add a message to the user?"
-                                    .to_string(),
-                            ));
-                            let mut tx = doc.transaction();
-                            reconcile(&mut tx, &agent).unwrap();
-                            tx.commit();
-                        });
-                    }
-
-                    if let Some(message) = response_message {
-                        let _ = responder.send(Some(message));
-                    } else if did_launch_app || did_nothing {
-                        let _ = responder.send(None);
-                    } else {
-                        let _ = responder.send(None);
-                    }
+                    handle_chat_request(chat_req, &main_task_doc_handle, &main_task_client, web_sink.as_ref()).await;
                 }
                 else => {
                     break;
@@ -705,6 +493,265 @@ fn start_automerge_infrastructure(
     });
 
     (doc_handle, main_task, chat_tx)
+}
+
+
+fn check_agent_state(doc_handle: &DocHandle) -> (bool, Option<AgentRequest>, Option<String>) {
+    doc_handle.with_doc_mut(|doc| {
+        let mut agent: LspAgent = hydrate(doc).unwrap();
+        let req = if !agent.requests.is_empty() {
+            Some(agent.requests.remove(0))
+        } else {
+            None
+        };
+
+        if req.is_some() {
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
+        }
+
+        (agent.should_exit, req, agent.active_model)
+    })
+}
+
+async fn perform_shutdown(client: &Arc<dyn InferenceClient>, repo_handle: &RepoHandle) {
+    client.notify_shutdown().await;
+    let repo_handle = repo_handle.clone();
+    Handle::current()
+        .spawn_blocking(move || {
+            repo_handle.stop().unwrap();
+        })
+        .await
+        .unwrap();
+}
+
+async fn handle_inference_request(
+    req: AgentRequest,
+    client: &Arc<dyn InferenceClient>,
+    active_model: Option<String>,
+    web_sink: &dyn Web,
+) {
+    match req {
+        AgentRequest::Inference { content, app_id } => {
+            let response_str = call_inference(
+                client.as_ref(),
+                content,
+                active_model,
+            )
+            .await;
+            web_sink
+                .handle_inference_response(app_id, response_str)
+                .await;
+        }
+    }
+}
+
+fn spawn_peer_connections(repo_handle: RepoHandle) {
+    let repo_clone1 = repo_handle.clone();
+    tokio::spawn(async move {
+        let addr1 = format!("127.0.0.1:{}", PEER1_PORT);
+        let listener = TcpListener::bind(addr1).await.unwrap();
+        loop {
+            if let Ok((socket, addr)) = listener.accept().await {
+                repo_clone1
+                    .connect_tokio_io(addr, socket, ConnDirection::Incoming)
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+
+    let repo_clone2 = repo_handle.clone();
+    tokio::spawn(async move {
+        let addr = format!("127.0.0.1:{}", PEER2_PORT);
+        loop {
+            match TcpStream::connect(&addr).await {
+                Ok(stream) => {
+                    repo_clone2
+                        .connect_tokio_io(addr, stream, ConnDirection::Outgoing)
+                        .await
+                        .unwrap();
+                    break;
+                }
+                Err(_) => {
+                    sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+    });
+}
+
+async fn handle_chat_request(
+    chat_req: ChatRequest,
+    doc_handle: &DocHandle,
+    client: &Arc<dyn InferenceClient>,
+    web_sink: &dyn Web,
+) {
+    let ChatRequest {
+        content: latest_user,
+        model: model_hint,
+        responder,
+    } = chat_req;
+
+    let (mut history, running_apps) = doc_handle.with_doc(|doc| {
+        let agent: LspAgent = hydrate(doc).unwrap();
+        (
+            agent.conversation_history.clone(),
+            collect_apps(&agent.webviews),
+        )
+    });
+    let docs_info = doc_handle.with_doc(|doc| {
+        let agent: LspAgent = hydrate(doc).unwrap();
+        collect_docs(&agent.text_documents)
+    });
+
+    let initial_history_len = history.len();
+
+    let mut apps_payload: Option<Vec<String>> = None;
+    let mut docs_payload: Option<prompts::DocsInfo> = None;
+    let mut response_message: Option<String> = None;
+    let mut launched_app: Option<String> = None;
+    let mut did_nothing = false;
+
+    let mut current_prompt_user = latest_user.clone();
+    let mut pushed_user_message = false;
+
+    let max_iterations = std::env::var("LSP_AGENT_TOOL_MAX_ITERATIONS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TOOL_MAX_ITERATIONS);
+
+    for _ in 0..max_iterations {
+        let request_text = prompts::build_web_request(
+            &history,
+            &current_prompt_user,
+            apps_payload.as_deref(),
+            docs_payload.as_ref(),
+        );
+        let tool_response_str =
+            call_inference(client.as_ref(), request_text, model_hint.clone())
+                .await;
+        let tool_response = parse_tool_response(&tool_response_str);
+
+        match tool_response.action.as_str() {
+            "answer" => {
+                response_message = tool_response.message;
+                break;
+            }
+            "nothing" => {
+                did_nothing = true;
+                break;
+            }
+            "launch_app" => {
+                launched_app = tool_response.app;
+                break;
+            }
+            "list_apps" => {
+                if apps_payload.is_some() {
+                    response_message = Some(
+                        "App list was already provided, but the assistant requested it again without concluding."
+                            .to_string(),
+                    );
+                    break;
+                }
+                apps_payload = Some(running_apps.clone());
+                if !pushed_user_message && !current_prompt_user.is_empty() {
+                    history.push(ConversationFragment::User(current_prompt_user.clone()));
+                    current_prompt_user.clear();
+                    pushed_user_message = true;
+                }
+                history.push(ConversationFragment::Assistant(
+                    "Assistant requested info on running apps.".to_string(),
+                ));
+                continue;
+            }
+            "list_docs" => {
+                if docs_payload.is_some() {
+                    response_message = Some(
+                        "Document list was already provided, but the assistant requested it again without concluding."
+                            .to_string(),
+                    );
+                    break;
+                }
+                docs_payload = Some(docs_info.clone());
+                if !pushed_user_message && !current_prompt_user.is_empty() {
+                    history.push(ConversationFragment::User(current_prompt_user.clone()));
+                    current_prompt_user.clear();
+                    pushed_user_message = true;
+                }
+                history.push(ConversationFragment::Assistant(
+                    "Assistant requested info on open documents.".to_string(),
+                ));
+                continue;
+            }
+            _ => {
+                response_message = Some(tool_response_str);
+            }
+        }
+    }
+
+    if !did_nothing && launched_app.is_none() && response_message.is_none() {
+        response_message = Some(
+            "No actionable response was produced. Please retry or rephrase."
+                .to_string(),
+        );
+    }
+
+    let launched_app_for_doc = launched_app.clone();
+    let did_launch_app = launched_app.is_some();
+    // did_request_docs and did_request_apps removed as we use history diff
+
+    doc_handle.with_doc_mut(|doc| {
+        let mut agent: LspAgent = hydrate(doc).unwrap();
+        if let Some(model) = model_hint.clone() {
+            agent.active_model = Some(model);
+        }
+
+        // 1. Add any history accumulated during tool use (User messages + Assistant markers)
+        let new_fragments: Vec<ConversationFragment> = history
+            .iter()
+            .skip(initial_history_len)
+            .cloned()
+            .collect();
+        agent.conversation_history.extend(new_fragments);
+
+        // 2. Ensuring user message is present if not already in history (e.g. immediate answer/launch)
+        if !pushed_user_message
+            && !latest_user.is_empty()
+            && (did_launch_app || response_message.is_some())
+        {
+            agent
+                .conversation_history
+                .push(ConversationFragment::User(latest_user.clone()));
+        }
+
+        // 3. Add final response
+        if let Some(message) = response_message.clone() {
+            agent
+                .conversation_history
+                .push(ConversationFragment::Assistant(message));
+        }
+
+        let mut tx = doc.transaction();
+        reconcile(&mut tx, &agent).unwrap();
+        tx.commit();
+    });
+
+    if let Some(app) = launched_app_for_doc {
+        let app_id = format!("app-{}", Uuid::new_v4());
+        web_sink
+            .launch_app(app_id.clone(), app.clone())
+            .await;
+    }
+
+    if let Some(message) = response_message {
+        let _ = responder.send(Some(message));
+    } else if did_launch_app || did_nothing {
+        let _ = responder.send(None);
+    } else {
+        let _ = responder.send(None);
+    }
 }
 
 async fn call_inference(
