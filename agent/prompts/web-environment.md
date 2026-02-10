@@ -194,3 +194,28 @@ async function readResult(key) {
 }
 ```
 ```
+
+## Storage Change Events
+
+Apps can listen for changes to stored values using the standard DOM event system.
+When a value is updated (by any app), a `doc_changed` event is fired on the `window` object.
+
+**Event Structure:**
+The event is a `CustomEvent` with a `detail` property containing:
+- `key`: String, the key that was updated.
+
+Example usage in JavaScript:
+
+```javascript
+window.addEventListener('doc_changed', (event) => {
+    const changedKey = event.detail.key;
+    console.log('Value changed:', changedKey);
+    
+    if (changedKey === 'my-key') {
+        // Reload the new value
+        readResult('my-key').then(newValue => {
+            updateUI(newValue);
+        });
+    }
+});
+```

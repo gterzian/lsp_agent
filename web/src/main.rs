@@ -16,6 +16,7 @@ use serde::Deserialize;
 #[derive(Debug)]
 enum AgentEvent {
     WebApp { id: String, content: String },
+    StorageUpdated(String),
 }
 
 #[derive(Debug)]
@@ -68,6 +69,10 @@ impl WebRuntime {
     async fn enqueue_inference_request(&self, app_id: String, responder: RequestAsyncResponder) {
         let mut pending = self.pending_inference_requests.lock().await;
         pending.entry(app_id).or_default().push_back(responder);
+    }
+
+    async fn notify_storage_update(&self, key: String) {
+        let _ = self.proxy.send_event(AgentEvent::StorageUpdated(key));
     }
 }
 
@@ -168,7 +173,8 @@ async fn handle_api_request(agent: &dyn WebAgent, req: ApiRequest, web_runtime: 
             description,
             responder,
         } => {
-            agent.store_value(key, value, description).await;
+            agent.store_value(key.clone(), value, description).await;
+            web_runtime.notify_storage_update(key).await;
             responder.respond(
                 http::Response::builder()
                     .header("Access-Control-Allow-Origin", "*")
@@ -358,6 +364,18 @@ fn main() {
                 println!("The close button was pressed.");
                 if let Some((_, _, app_id)) = views.remove(&window_id) {
                     let _ = backend_tx.blocking_send(BackendCommand::CloseApp(app_id));
+                }
+            }
+            Event::UserEvent(AgentEvent::StorageUpdated(key)) => {
+                println!("Storage updated: {}", key);
+                if let Ok(safe_key) = serde_json::to_string(&key) {
+                    let js = format!(
+                        "window.dispatchEvent(new CustomEvent('doc_changed', {{ detail: {{ key: {} }} }}));",
+                        safe_key
+                    );
+                    for (_, webview, _) in views.values() {
+                        let _ = webview.evaluate_script(&js);
+                    }
                 }
             }
             Event::LoopDestroyed => {
