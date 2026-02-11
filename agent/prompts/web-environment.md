@@ -195,6 +195,11 @@ async function readResult(key) {
 ```
 ```
 
+**Initialization Best Practice:**
+If your app uses stored values (like a scoreboard, a list of items, or a configuration), you MUST store the initial state immediately upon app startup if the value does not already exist. 
+- This ensures the value structure (schema) is visible to the assistant via `list_app_values` even if the user hasn't interacted with the app yet.
+- Example: A game should store `{ wins: 0, losses: 0 }` on load.
+
 ## Storage Change Events
 
 Apps can listen for changes to stored values using the standard DOM event system.
