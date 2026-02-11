@@ -13,8 +13,8 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, Mutex, oneshot};
-use tokio::time::{sleep, Duration};
+use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::time::{Duration, sleep};
 use traits::{InferenceClient, Web, WebAgent, WorkspaceAgent};
 use uuid::Uuid;
 
@@ -121,14 +121,13 @@ impl Web for DocWebSink {
     async fn launch_app(&self, id: String, content: String) {
         self.doc_handle.with_doc_mut(|doc| {
             let mut agent: LspAgent = hydrate(doc).unwrap();
-            agent
-                .webviews
-                .documents
-                .insert(id.clone(), DocumentContent { text: content.clone() });
-            agent.responses.push(AgentResponse::WebApp {
-                id,
-                content,
-            });
+            agent.webviews.documents.insert(
+                id.clone(),
+                DocumentContent {
+                    text: content.clone(),
+                },
+            );
+            agent.responses.push(AgentResponse::WebApp { id, content });
             let mut tx = doc.transaction();
             reconcile(&mut tx, &agent).unwrap();
             tx.commit();
@@ -138,7 +137,9 @@ impl Web for DocWebSink {
     async fn handle_inference_response(&self, app_id: String, content: String) {
         self.doc_handle.with_doc_mut(|doc| {
             let mut agent: LspAgent = hydrate(doc).unwrap();
-            agent.responses.push(AgentResponse::Inference { app_id, content });
+            agent
+                .responses
+                .push(AgentResponse::Inference { app_id, content });
             let mut tx = doc.transaction();
             reconcile(&mut tx, &agent).unwrap();
             tx.commit();
@@ -232,7 +233,9 @@ impl WebAgent for DocWebAgent {
     async fn app_inference_request(&self, content: String, app_id: String) {
         self.doc_handle.with_doc_mut(|doc| {
             let mut agent: LspAgent = hydrate(doc).unwrap();
-            agent.requests.push(AgentRequest::Inference { content, app_id });
+            agent
+                .requests
+                .push(AgentRequest::Inference { content, app_id });
             let mut tx = doc.transaction();
             reconcile(&mut tx, &agent).unwrap();
             tx.commit();
@@ -444,7 +447,11 @@ fn spawn_web_client() -> Option<Child> {
 /// and writes `AgentResponse` entries that the web client will handle.
 fn start_automerge_infrastructure(
     client: Arc<dyn InferenceClient>,
-) -> (DocHandle, tokio::task::JoinHandle<()>, mpsc::Sender<ChatRequest>) {
+) -> (
+    DocHandle,
+    tokio::task::JoinHandle<()>,
+    mpsc::Sender<ChatRequest>,
+) {
     let handle = Handle::current();
 
     let repo1 = Repo::new(None, Box::new(NoStorage));
@@ -514,7 +521,6 @@ fn start_automerge_infrastructure(
     (doc_handle, main_task, chat_tx)
 }
 
-
 fn check_agent_state(doc_handle: &DocHandle) -> (bool, Option<AgentRequest>, Option<String>) {
     doc_handle.with_doc_mut(|doc| {
         let mut agent: LspAgent = hydrate(doc).unwrap();
@@ -553,12 +559,7 @@ async fn handle_inference_request(
 ) {
     match req {
         AgentRequest::Inference { content, app_id } => {
-            let response_str = call_inference(
-                client.as_ref(),
-                content,
-                active_model,
-            )
-            .await;
+            let response_str = call_inference(client.as_ref(), content, active_model).await;
             web_sink
                 .handle_inference_response(app_id, response_str)
                 .await;
@@ -649,8 +650,7 @@ async fn handle_chat_request(
             stored_values_payload.as_deref(),
         );
         let tool_response_str =
-            call_inference(client.as_ref(), request_text, model_hint.clone())
-                .await;
+            call_inference(client.as_ref(), request_text, model_hint.clone()).await;
         let tool_response = parse_tool_response(&tool_response_str);
 
         let mut next_turn_reason: Option<String> = None;
@@ -718,10 +718,8 @@ async fn handle_chat_request(
     }
 
     if !did_nothing && launched_app.is_none() && response_message.is_none() {
-        response_message = Some(
-            "No actionable response was produced. Please retry or rephrase."
-                .to_string(),
-        );
+        response_message =
+            Some("No actionable response was produced. Please retry or rephrase.".to_string());
     }
 
     let launched_app_for_doc = launched_app.clone();
@@ -735,11 +733,8 @@ async fn handle_chat_request(
         }
 
         // 1. Add any history accumulated during tool use (User messages + Assistant markers)
-        let new_fragments: Vec<ConversationFragment> = history
-            .iter()
-            .skip(initial_history_len)
-            .cloned()
-            .collect();
+        let new_fragments: Vec<ConversationFragment> =
+            history.iter().skip(initial_history_len).cloned().collect();
         agent.conversation_history.extend(new_fragments);
 
         // 2. Ensuring user message is present if not already in history (e.g. immediate answer/launch)
@@ -766,9 +761,7 @@ async fn handle_chat_request(
 
     if let Some(app) = launched_app_for_doc {
         let app_id = format!("app-{}", Uuid::new_v4());
-        web_sink
-            .launch_app(app_id.clone(), app.clone())
-            .await;
+        web_sink.launch_app(app_id.clone(), app.clone()).await;
     }
 
     if let Some(message) = response_message {
@@ -841,4 +834,241 @@ fn collect_stored_values(
             description: v.description.clone(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::{DocumentManager, StoredValue, Uri};
+
+    #[test]
+    fn test_find_repo_root_with_workspace() {
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let cargo_toml_path = temp_dir.path().join("Cargo.toml");
+
+        let mut file = File::create(&cargo_toml_path).unwrap();
+        writeln!(file, "[workspace]").unwrap();
+
+        let exe_path = temp_dir.path().join("bin").join("test_exe");
+        std::fs::create_dir_all(exe_path.parent().unwrap()).unwrap();
+
+        let result = find_repo_root(&exe_path);
+        assert_eq!(result, Some(temp_dir.path().to_path_buf()));
+    }
+
+    #[test]
+    fn test_find_repo_root_without_workspace() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let exe_path = temp_dir.path().join("test_exe");
+
+        let result = find_repo_root(&exe_path);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_collect_apps() {
+        let mut manager = DocumentManager::default();
+        manager.documents.insert(
+            "app1".to_string(),
+            DocumentContent {
+                text: "html1".to_string(),
+            },
+        );
+        manager.documents.insert(
+            "app2".to_string(),
+            DocumentContent {
+                text: "html2".to_string(),
+            },
+        );
+
+        let apps = collect_apps(&manager);
+        assert_eq!(apps.len(), 2);
+        assert!(apps.contains(&"html1".to_string()));
+        assert!(apps.contains(&"html2".to_string()));
+    }
+
+    #[test]
+    fn test_collect_docs_basic() {
+        let mut manager = DocumentManager::default();
+        manager.documents.insert(
+            "file1.rs".to_string(),
+            DocumentContent {
+                text: "code1".to_string(),
+            },
+        );
+        manager.documents.insert(
+            "file2.rs".to_string(),
+            DocumentContent {
+                text: "code2".to_string(),
+            },
+        );
+
+        let docs = collect_docs(&manager);
+        assert_eq!(docs.open_documents.len(), 2);
+        assert!(docs.open_documents.contains(&"file1.rs".to_string()));
+        assert!(docs.open_documents.contains(&"file2.rs".to_string()));
+        assert_eq!(docs.active_document, None);
+    }
+
+    #[test]
+    fn test_collect_docs_with_active() {
+        let mut manager = DocumentManager::default();
+        manager.documents.insert(
+            "file1.rs".to_string(),
+            DocumentContent {
+                text: "code1".to_string(),
+            },
+        );
+        manager.active_document = Some(Uri {
+            value: "file1.rs".to_string(),
+        });
+
+        let docs = collect_docs(&manager);
+        assert_eq!(docs.open_documents.len(), 1);
+        assert_eq!(docs.active_document, Some("file1.rs".to_string()));
+    }
+
+    #[test]
+    fn test_collect_docs_active_not_in_open() {
+        let mut manager = DocumentManager::default();
+        manager.documents.insert(
+            "file1.rs".to_string(),
+            DocumentContent {
+                text: "code1".to_string(),
+            },
+        );
+        manager.active_document = Some(Uri {
+            value: "file2.rs".to_string(),
+        });
+
+        let docs = collect_docs(&manager);
+        assert_eq!(docs.open_documents.len(), 2);
+        assert!(docs.open_documents.contains(&"file1.rs".to_string()));
+        assert!(docs.open_documents.contains(&"file2.rs".to_string()));
+        assert_eq!(docs.active_document, Some("file2.rs".to_string()));
+    }
+
+    #[test]
+    fn test_collect_stored_values() {
+        let mut values = std::collections::HashMap::new();
+        values.insert(
+            "key1".to_string(),
+            StoredValue {
+                value: "value1".to_string(),
+                description: "desc1".to_string(),
+            },
+        );
+        values.insert(
+            "key2".to_string(),
+            StoredValue {
+                value: "value2".to_string(),
+                description: "desc2".to_string(),
+            },
+        );
+
+        let infos = collect_stored_values(&values);
+        assert_eq!(infos.len(), 2);
+
+        let info1 = infos.iter().find(|i| i.key == "key1").unwrap();
+        assert_eq!(info1.description, "desc1");
+
+        let info2 = infos.iter().find(|i| i.key == "key2").unwrap();
+        assert_eq!(info2.description, "desc2");
+    }
+
+    #[test]
+    fn test_parse_tool_response_valid_json() {
+        let json = r#"{"action": "answer", "message": "Hello!", "app": "test"}"#;
+        let response = parse_tool_response(json);
+
+        assert_eq!(response.action, "answer");
+        assert_eq!(response.message, Some("Hello!".to_string()));
+        assert_eq!(response.app, Some("test".to_string()));
+    }
+
+    #[test]
+    fn test_parse_tool_response_answer_without_message() {
+        let json = r#"{"action": "answer"}"#;
+        let response = parse_tool_response(json);
+
+        assert_eq!(response.action, "answer");
+        assert_eq!(
+            response.message,
+            Some(r#"{"action": "answer"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_tool_response_invalid_json() {
+        let invalid_json = "not json";
+        let response = parse_tool_response(invalid_json);
+
+        assert_eq!(response.action, "answer");
+        assert_eq!(response.message, Some("not json".to_string()));
+        assert_eq!(response.app, None);
+    }
+
+    #[test]
+    fn test_call_inference_success() {
+        use async_trait::async_trait;
+        use mockall::mock;
+        use std::sync::Arc;
+        use tokio::runtime::Runtime;
+        use traits::InferenceClient;
+
+        mock! {
+            pub TestClient {}
+            #[async_trait]
+            impl InferenceClient for TestClient {
+                async fn inference(&self, request: String, model: Option<String>) -> Result<String, String>;
+                async fn notify_shutdown(&self);
+            }
+        }
+
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut mock_client = MockTestClient::new();
+            mock_client
+                .expect_inference()
+                .returning(|_, _| Ok("response".to_string()));
+
+            let result = call_inference(&mock_client, "request".to_string(), None).await;
+            assert_eq!(result, "response");
+        });
+    }
+
+    #[test]
+    fn test_call_inference_error() {
+        use async_trait::async_trait;
+        use mockall::mock;
+        use std::sync::Arc;
+        use tokio::runtime::Runtime;
+        use traits::InferenceClient;
+
+        mock! {
+            pub TestClient {}
+            #[async_trait]
+            impl InferenceClient for TestClient {
+                async fn inference(&self, request: String, model: Option<String>) -> Result<String, String>;
+                async fn notify_shutdown(&self);
+            }
+        }
+
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut mock_client = MockTestClient::new();
+            mock_client
+                .expect_inference()
+                .returning(|_, _| Err("inference error".to_string()));
+
+            let result = call_inference(&mock_client, "request".to_string(), None).await;
+            assert_eq!(result, "Error: inference error");
+        });
+    }
 }

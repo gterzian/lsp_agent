@@ -4,17 +4,51 @@ set -e
 ROOT_DIR=$(cd "$(dirname "$0")" && pwd)
 cd "$ROOT_DIR"
 
-echo "=== Building Rust Server ==="
-cd vs_code_lsp/server
+echo "=== Testing and Building Traits ==="
+cd traits
 cargo fmt
 cargo clippy -- -D warnings
+cargo test
+cargo build
+cd ..
+
+echo "=== Testing and Building Shared Document ==="
+cd agent/shared_document
+cargo fmt
+cargo clippy -- -D warnings
+cargo test
 cargo build
 cd ../..
 
-echo "=== Building Rust Web Client ==="
+echo "=== Testing and Building Prompts ==="
+cd agent/prompts
+cargo fmt
+cargo clippy -- -D warnings
+cargo test
+cargo build
+cd ../..
+
+echo "=== Testing and Building Agent Core ==="
+cd agent
+cargo fmt
+cargo clippy -- -D warnings
+cargo test
+cargo build
+cd ..
+
+echo "=== Testing and Building Rust Server ==="
+cd vs_code_lsp/server
+cargo fmt
+cargo clippy -- -D warnings
+cargo test
+cargo build
+cd ../..
+
+echo "=== Testing and Building Rust Web Client ==="
 cd web
 cargo fmt
 cargo clippy -- -D warnings
+cargo test
 cargo build
 cd ..
 

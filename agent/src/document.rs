@@ -1,7 +1,7 @@
-use autosurgeon::{Hydrate, Reconcile};
-use std::collections::HashMap;
 use automerge_repo::{DocumentId, Storage, StorageError};
+use autosurgeon::{Hydrate, Reconcile};
 use futures::future::BoxFuture;
+use std::collections::HashMap;
 
 pub struct NoStorage;
 

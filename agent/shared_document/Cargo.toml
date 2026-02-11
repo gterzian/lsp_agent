@@ -8,3 +8,6 @@ autosurgeon = { workspace = true }
 automerge = { workspace = true }
 automerge_repo = { workspace = true }
 futures = { workspace = true }
+
+[dev-dependencies]
+mockall = "0.12"

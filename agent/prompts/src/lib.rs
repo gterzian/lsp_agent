@@ -91,3 +91,110 @@ pub struct DocsInfo {
     pub open_documents: Vec<String>,
     pub active_document: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_web_request_basic() {
+        let history = vec![ConversationFragment::User("hello".to_string())];
+        let request = build_web_request(&history, "test prompt", None, None);
+
+        // Should contain the system prompt
+        assert!(request.contains("You are an expert web developer assistant"));
+        assert!(request.contains("hello"));
+        assert!(request.contains("test prompt"));
+
+        // Should not contain optional fields - check that "apps" field is not in the JSON
+        assert!(!request.contains("\"apps\":"));
+        assert!(!request.contains("\"open_documents\":"));
+    }
+
+    #[test]
+    fn test_build_web_request_with_docs() {
+        let history = vec![];
+        let docs = DocsInfo {
+            open_documents: vec!["file1.rs".to_string(), "file2.rs".to_string()],
+            active_document: Some("file1.rs".to_string()),
+        };
+        let request = build_web_request(&history, "summarize", None, Some(&docs));
+
+        assert!(request.contains("file1.rs"));
+        assert!(request.contains("file2.rs"));
+        assert!(request.contains("open documents"));
+    }
+
+    #[test]
+    fn test_build_web_request_with_all_options() {
+        let history = vec![
+            ConversationFragment::User("user question".to_string()),
+            ConversationFragment::Assistant("assistant response".to_string()),
+        ];
+        let apps = vec!["todo app".to_string()];
+        let docs = DocsInfo {
+            open_documents: vec!["main.rs".to_string()],
+            active_document: Some("main.rs".to_string()),
+        };
+        let request = build_web_request(&history, "help me", Some(&apps), Some(&docs));
+
+        assert!(request.contains("user question"));
+        assert!(request.contains("assistant response"));
+        assert!(request.contains("todo app"));
+        assert!(request.contains("main.rs"));
+        assert!(request.contains("running apps"));
+        assert!(request.contains("open documents"));
+    }
+
+    #[test]
+    fn test_render_history_basic() {
+        let history = vec![
+            ConversationFragment::User("user message".to_string()),
+            ConversationFragment::Assistant("assistant message".to_string()),
+        ];
+
+        let items = render_history(&history, false, false);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].role, "user");
+        assert_eq!(items[0].content, "user message");
+        assert_eq!(items[1].role, "assistant");
+        assert_eq!(items[1].content, "assistant message");
+    }
+
+    #[test]
+    fn test_render_history_with_markers() {
+        let history = vec![ConversationFragment::User("test".to_string())];
+
+        let items = render_history(&history, true, true);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[1].role, "assistant");
+        assert_eq!(
+            items[1].content,
+            "Assistant requested info on running apps."
+        );
+        assert_eq!(items[2].role, "assistant");
+        assert_eq!(
+            items[2].content,
+            "Assistant requested info on open documents."
+        );
+    }
+
+    #[test]
+    fn test_render_history_empty() {
+        let history = vec![];
+        let items = render_history(&history, false, false);
+        assert_eq!(items.len(), 0);
+    }
+
+    #[test]
+    fn test_docs_info_serialization() {
+        let docs = DocsInfo {
+            open_documents: vec!["a.rs".to_string(), "b.rs".to_string()],
+            active_document: Some("a.rs".to_string()),
+        };
+
+        let json = serde_json::to_string(&docs).unwrap();
+        assert!(json.contains("a.rs"));
+        assert!(json.contains("b.rs"));
+    }
+}

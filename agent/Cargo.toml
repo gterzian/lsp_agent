@@ -16,3 +16,8 @@ tokio = { workspace = true }
 traits = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
+
+[dev-dependencies]
+mockall = "0.12"
+tokio-test = "0.4"
+tempfile = "3.0"

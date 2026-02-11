@@ -1,5 +1,5 @@
-use serde::Serialize;
 use crate::ConversationFragment;
+use serde::Serialize;
 
 const WEB_ENVIRONMENT_SYSTEM_PROMPT: &str = include_str!("../prompts/web-environment.md");
 
