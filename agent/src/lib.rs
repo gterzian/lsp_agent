@@ -365,7 +365,10 @@ async fn handle_web_doc_change(doc_handle: &DocHandle, web: &dyn Web) -> bool {
 
 fn take_response(doc_handle: &DocHandle) -> Option<AgentResponse> {
     doc_handle.with_doc_mut(|doc| {
-        let mut agent: LspAgent = hydrate(doc).unwrap();
+        let mut agent: LspAgent = match hydrate(doc) {
+            Ok(a) => a,
+            Err(_) => return None,
+        };
         let resp = if !agent.responses.is_empty() {
             Some(agent.responses.remove(0))
         } else {
@@ -1014,12 +1017,10 @@ mod tests {
         assert_eq!(response.app, None);
     }
 
-    #[test]
-    fn test_call_inference_success() {
+    #[tokio::test]
+    async fn test_call_inference_success() {
         use async_trait::async_trait;
         use mockall::mock;
-        use std::sync::Arc;
-        use tokio::runtime::Runtime;
         use traits::InferenceClient;
 
         mock! {
@@ -1031,44 +1032,271 @@ mod tests {
             }
         }
 
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut mock_client = MockTestClient::new();
-            mock_client
-                .expect_inference()
-                .returning(|_, _| Ok("response".to_string()));
+        let mut mock_client = MockTestClient::new();
+        mock_client
+            .expect_inference()
+            .returning(|_, _| Ok("response".to_string()));
 
-            let result = call_inference(&mock_client, "request".to_string(), None).await;
-            assert_eq!(result, "response");
+        let result = call_inference(&mock_client, "request".to_string(), None).await;
+        assert_eq!(result, "response");
+    }
+
+    #[tokio::test]
+    async fn test_call_inference_error() {
+        use async_trait::async_trait;
+        use mockall::mock;
+        use traits::InferenceClient;
+
+        mock! {
+            pub TestClient {}
+            #[async_trait]
+            impl InferenceClient for TestClient {
+                async fn inference(&self, request: String, model: Option<String>) -> Result<String, String>;
+                async fn notify_shutdown(&self);
+            }
+        }
+
+        let mut mock_client = MockTestClient::new();
+        mock_client
+            .expect_inference()
+            .returning(|_, _| Err("inference error".to_string()));
+
+        let result = call_inference(&mock_client, "request".to_string(), None).await;
+        assert_eq!(result, "Error: inference error");
+    }
+
+    // Web response handling tests
+    #[tokio::test]
+    async fn test_handle_web_doc_change_launch_app() {
+        struct RecordingWeb {
+            launched: tokio::sync::Mutex<Vec<(String, String)>>,
+            inference: tokio::sync::Mutex<Vec<(String, String)>>,
+        }
+
+        #[async_trait::async_trait]
+        impl Web for RecordingWeb {
+            async fn launch_app(&self, id: String, content: String) {
+                let mut l = self.launched.lock().await;
+                l.push((id, content));
+            }
+
+            async fn handle_inference_response(&self, app_id: String, content: String) {
+                let mut v = self.inference.lock().await;
+                v.push((app_id, content));
+            }
+        }
+
+        let repo = Repo::new(None, Box::new(NoStorage));
+        let repo_handle = repo.run();
+        let doc_handle = repo_handle.new_document();
+
+        // Insert a WebApp response
+        doc_handle.with_doc_mut(|doc| {
+            let mut agent: LspAgent = match hydrate(doc) {
+                Ok(a) => a,
+                Err(_) => LspAgent::default(),
+            };
+            agent.responses.push(AgentResponse::WebApp {
+                id: "appA".to_string(),
+                content: "<html/>".to_string(),
+            });
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
+        });
+
+        let web = RecordingWeb {
+            launched: tokio::sync::Mutex::new(vec![]),
+            inference: tokio::sync::Mutex::new(vec![]),
+        };
+        let rc = &web;
+
+        // Should handle and launch app
+        let handled = handle_web_doc_change(&doc_handle, rc).await;
+        assert!(!handled, "should not signal exit");
+
+        // verify launched
+        let launched = web.launched.lock().await;
+        assert_eq!(launched.len(), 1);
+        assert_eq!(launched[0].0, "appA");
+        assert_eq!(launched[0].1, "<html/>".to_string());
+
+        // ensure response removed
+        doc_handle.with_doc(|doc| {
+            let agent: LspAgent = match hydrate(doc) {
+                Ok(a) => a,
+                Err(_) => LspAgent::default(),
+            };
+            assert!(agent.responses.is_empty());
         });
     }
 
-    #[test]
-    fn test_call_inference_error() {
-        use async_trait::async_trait;
-        use mockall::mock;
-        use std::sync::Arc;
-        use tokio::runtime::Runtime;
-        use traits::InferenceClient;
+    #[tokio::test]
+    async fn test_handle_web_doc_change_inference() {
+        struct RecordingWeb {
+            launched: tokio::sync::Mutex<Vec<(String, String)>>,
+            inference: tokio::sync::Mutex<Vec<(String, String)>>,
+        }
 
-        mock! {
-            pub TestClient {}
-            #[async_trait]
-            impl InferenceClient for TestClient {
-                async fn inference(&self, request: String, model: Option<String>) -> Result<String, String>;
-                async fn notify_shutdown(&self);
+        #[async_trait::async_trait]
+        impl Web for RecordingWeb {
+            async fn launch_app(&self, _id: String, _content: String) {
+                // no-op for this test
+            }
+
+            async fn handle_inference_response(&self, app_id: String, content: String) {
+                let mut v = self.inference.lock().await;
+                v.push((app_id, content));
             }
         }
 
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut mock_client = MockTestClient::new();
-            mock_client
-                .expect_inference()
-                .returning(|_, _| Err("inference error".to_string()));
+        let repo = Repo::new(None, Box::new(NoStorage));
+        let repo_handle = repo.run();
+        let doc_handle = repo_handle.new_document();
 
-            let result = call_inference(&mock_client, "request".to_string(), None).await;
-            assert_eq!(result, "Error: inference error");
+        doc_handle.with_doc_mut(|doc| {
+            let mut agent: LspAgent = match hydrate(doc) {
+                Ok(a) => a,
+                Err(_) => LspAgent::default(),
+            };
+            agent.responses.push(AgentResponse::Inference {
+                app_id: "a1".to_string(),
+                content: "ok".to_string(),
+            });
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
         });
+
+        let web = RecordingWeb {
+            launched: tokio::sync::Mutex::new(vec![]),
+            inference: tokio::sync::Mutex::new(vec![]),
+        };
+        let rc = &web;
+
+        let handled = handle_web_doc_change(&doc_handle, rc).await;
+        assert!(!handled);
+
+        let inf = web.inference.lock().await;
+        assert_eq!(inf.len(), 1);
+        assert_eq!(inf[0].0, "a1");
+        assert_eq!(inf[0].1, "ok".to_string());
+
+        doc_handle.with_doc(|doc| {
+            let agent: LspAgent = match hydrate(doc) {
+                Ok(a) => a,
+                Err(_) => LspAgent::default(),
+            };
+            assert!(agent.responses.is_empty());
+        });
+    }
+
+    #[tokio::test]
+    async fn test_handle_web_doc_change_chat_ignored() {
+        struct RecordingWeb {
+            launched: tokio::sync::Mutex<Vec<(String, String)>>,
+            inference: tokio::sync::Mutex<Vec<(String, String)>>,
+        }
+
+        #[async_trait::async_trait]
+        impl Web for RecordingWeb {
+            async fn launch_app(&self, _id: String, _content: String) {}
+            async fn handle_inference_response(&self, _app_id: String, _content: String) {}
+        }
+
+        let repo = Repo::new(None, Box::new(NoStorage));
+        let repo_handle = repo.run();
+        let doc_handle = repo_handle.new_document();
+
+        doc_handle.with_doc_mut(|doc| {
+            let mut agent: LspAgent = match hydrate(doc) {
+                Ok(a) => a,
+                Err(_) => LspAgent::default(),
+            };
+            agent.responses.push(AgentResponse::Chat("hey".to_string()));
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
+        });
+
+        let web = RecordingWeb {
+            launched: tokio::sync::Mutex::new(vec![]),
+            inference: tokio::sync::Mutex::new(vec![]),
+        };
+        let rc = &web;
+
+        let handled = handle_web_doc_change(&doc_handle, rc).await;
+        assert!(!handled);
+
+        // Chat response should still be present because it is ignored by web handler
+        doc_handle.with_doc(|doc| {
+            let agent: LspAgent = match hydrate(doc) {
+                Ok(a) => a,
+                Err(_) => LspAgent::default(),
+            };
+            assert_eq!(agent.responses.len(), 1);
+            match &agent.responses[0] {
+                AgentResponse::Chat(msg) => assert_eq!(msg, "hey"),
+                _ => panic!("expected chat"),
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn test_take_response_direct_and_should_exit() {
+        let repo = Repo::new(None, Box::new(NoStorage));
+        let repo_handle = repo.run();
+        let doc_handle = repo_handle.new_document();
+
+        // take_response returns None when empty
+        let none = take_response(&doc_handle);
+        assert!(none.is_none());
+
+        // add a response and ensure take_response returns it and removes it
+        doc_handle.with_doc_mut(|doc| {
+            let mut agent: LspAgent = match hydrate(doc) {
+                Ok(a) => a,
+                Err(_) => LspAgent::default(),
+            };
+            agent
+                .responses
+                .push(AgentResponse::Chat("hello".to_string()));
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
+        });
+
+        let resp = take_response(&doc_handle);
+        assert!(matches!(resp, Some(AgentResponse::Chat(_))));
+
+        // should_exit test
+        doc_handle.with_doc_mut(|doc| {
+            let mut agent: LspAgent = match hydrate(doc) {
+                Ok(a) => a,
+                Err(_) => LspAgent::default(),
+            };
+            agent.should_exit = true;
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &agent).unwrap();
+            tx.commit();
+        });
+
+        struct RecordingWeb2 {
+            launched: tokio::sync::Mutex<Vec<(String, String)>>,
+            inference: tokio::sync::Mutex<Vec<(String, String)>>,
+        }
+
+        #[async_trait::async_trait]
+        impl Web for RecordingWeb2 {
+            async fn launch_app(&self, _id: String, _content: String) {}
+            async fn handle_inference_response(&self, _app_id: String, _content: String) {}
+        }
+
+        let rc = RecordingWeb2 {
+            launched: tokio::sync::Mutex::new(vec![]),
+            inference: tokio::sync::Mutex::new(vec![]),
+        };
+        let ret = handle_web_doc_change(&doc_handle, &rc).await;
+        assert!(ret, "expected true when should_exit is set");
     }
 }

@@ -98,35 +98,76 @@ mod tests {
 
     #[test]
     fn test_build_web_request_basic() {
+        use serde_json::Value;
         let history = vec![ConversationFragment::User("hello".to_string())];
         let request = build_web_request(&history, "test prompt", None, None);
+        let parsed: Value = serde_json::from_str(&request).unwrap();
 
-        // Should contain the system prompt
-        assert!(request.contains("You are an expert web developer assistant"));
-        assert!(request.contains("hello"));
-        assert!(request.contains("test prompt"));
+        // Should contain the system prompt and latest_user
+        assert!(parsed["system"]
+            .as_str()
+            .unwrap()
+            .contains("You are an expert web developer assistant"));
+        assert_eq!(parsed["latest_user"].as_str().unwrap(), "test prompt");
+        assert!(parsed["history"].is_array());
 
-        // Should not contain optional fields - check that "apps" field is not in the JSON
-        assert!(!request.contains("\"apps\":"));
-        assert!(!request.contains("\"open_documents\":"));
+        // Optional fields should be absent
+        assert!(parsed.get("apps").is_none());
+        assert!(parsed.get("open_documents").is_none());
+    }
+
+    #[test]
+    fn test_build_web_request_with_apps() {
+        use serde_json::Value;
+        let history = vec![ConversationFragment::Assistant(
+            "previous response".to_string(),
+        )];
+        let apps = vec!["app1".to_string(), "app2".to_string()];
+        let request = build_web_request(&history, "launch app", Some(&apps), None);
+        let parsed: Value = serde_json::from_str(&request).unwrap();
+
+        let apps_val = parsed
+            .get("apps")
+            .and_then(|v| v.as_array())
+            .expect("apps should be an array");
+        assert_eq!(apps_val[0].as_str().unwrap(), "app1");
+        assert_eq!(apps_val[1].as_str().unwrap(), "app2");
+        assert!(parsed.get("apps_note").is_some());
+        assert!(parsed["history"].as_array().unwrap()[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("previous response"));
     }
 
     #[test]
     fn test_build_web_request_with_docs() {
+        use serde_json::Value;
         let history = vec![];
         let docs = DocsInfo {
             open_documents: vec!["file1.rs".to_string(), "file2.rs".to_string()],
             active_document: Some("file1.rs".to_string()),
         };
         let request = build_web_request(&history, "summarize", None, Some(&docs));
+        let parsed: Value = serde_json::from_str(&request).unwrap();
 
-        assert!(request.contains("file1.rs"));
-        assert!(request.contains("file2.rs"));
-        assert!(request.contains("open documents"));
+        let docs_arr = parsed
+            .get("open_documents")
+            .and_then(|v| v.as_array())
+            .expect("open_documents should be an array");
+        assert!(docs_arr.iter().any(|v| v.as_str().unwrap() == "file1.rs"));
+        assert!(parsed.get("docs_note").is_some());
+        assert_eq!(
+            parsed
+                .get("active_document")
+                .and_then(|v| v.as_str())
+                .unwrap(),
+            "file1.rs"
+        );
     }
 
     #[test]
     fn test_build_web_request_with_all_options() {
+        use serde_json::Value;
         let history = vec![
             ConversationFragment::User("user question".to_string()),
             ConversationFragment::Assistant("assistant response".to_string()),
@@ -137,13 +178,16 @@ mod tests {
             active_document: Some("main.rs".to_string()),
         };
         let request = build_web_request(&history, "help me", Some(&apps), Some(&docs));
+        let parsed: Value = serde_json::from_str(&request).unwrap();
 
-        assert!(request.contains("user question"));
-        assert!(request.contains("assistant response"));
-        assert!(request.contains("todo app"));
-        assert!(request.contains("main.rs"));
-        assert!(request.contains("running apps"));
-        assert!(request.contains("open documents"));
+        let hist = parsed.get("history").and_then(|v| v.as_array()).unwrap();
+        assert!(hist
+            .iter()
+            .any(|i| i["content"].as_str().unwrap() == "user question"));
+        assert_eq!(parsed["apps"][0].as_str().unwrap(), "todo app");
+        assert_eq!(parsed["open_documents"][0].as_str().unwrap(), "main.rs");
+        assert!(parsed.get("apps_note").is_some());
+        assert!(parsed.get("docs_note").is_some());
     }
 
     #[test]
