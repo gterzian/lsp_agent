@@ -21,10 +21,10 @@ use uuid::Uuid;
 fn find_repo_root(exe_path: &std::path::Path) -> Option<std::path::PathBuf> {
     for ancestor in exe_path.ancestors() {
         let candidate = ancestor.join("Cargo.toml");
-        if let Ok(contents) = std::fs::read_to_string(&candidate) {
-            if contents.contains("[workspace]") {
-                return Some(ancestor.to_path_buf());
-            }
+        if let Ok(contents) = std::fs::read_to_string(&candidate)
+            && contents.contains("[workspace]")
+        {
+            return Some(ancestor.to_path_buf());
         }
     }
     None
@@ -773,8 +773,6 @@ async fn handle_chat_request(
 
     if let Some(message) = response_message {
         let _ = responder.send(Some(message));
-    } else if did_launch_app || did_nothing {
-        let _ = responder.send(None);
     } else {
         let _ = responder.send(None);
     }
@@ -822,10 +820,10 @@ fn collect_docs(manager: &DocumentManager) -> prompts::DocsInfo {
         .active_document
         .as_ref()
         .map(|uri| uri.value.clone());
-    if let Some(active) = &active_document {
-        if !open_documents.contains(active) {
-            open_documents.push(active.clone());
-        }
+    if let Some(active) = &active_document
+        && !open_documents.contains(active)
+    {
+        open_documents.push(active.clone());
     }
     prompts::DocsInfo {
         open_documents,

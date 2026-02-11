@@ -7,12 +7,14 @@ cd "$ROOT_DIR"
 echo "=== Building Rust Server ==="
 cd vs_code_lsp/server
 cargo fmt
+cargo clippy -- -D warnings
 cargo build
 cd ../..
 
 echo "=== Building Rust Web Client ==="
 cd web
 cargo fmt
+cargo clippy -- -D warnings
 cargo build
 cd ..
 

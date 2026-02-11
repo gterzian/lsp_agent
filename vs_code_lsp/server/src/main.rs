@@ -121,26 +121,31 @@ impl LanguageServer for Backend {
         &self,
         params: ExecuteCommandParams,
     ) -> LspResult<Option<serde_json::Value>> {
-        if params.command == "lsp-agent.log-chat" {
-            if let Some(arg) = params.arguments.first().and_then(|v| v.as_str()) {
-                let user_input = arg.to_string();
-                let model = params
-                    .arguments
-                    .get(1)
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let response = self.agent.chat_request(user_input, model).await;
-                if let Some(message) = response {
-                    return Ok(Some(serde_json::Value::String(message)));
+        match params.command.as_str() {
+            "lsp-agent.log-chat" => {
+                if let Some(arg) = params.arguments.first().and_then(|v| v.as_str()) {
+                    let user_input = arg.to_string();
+                    let model = params
+                        .arguments
+                        .get(1)
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let response = self.agent.chat_request(user_input, model).await;
+                    if let Some(message) = response {
+                        return Ok(Some(serde_json::Value::String(message)));
+                    }
+                    return Ok(None);
                 }
-                return Ok(None);
+                Ok(None)
             }
-        } else if params.command == "lsp-agent.active-doc" {
-            if let Some(uri) = params.arguments.first().and_then(|v| v.as_str()) {
-                self.agent.set_active_document(uri.to_string()).await;
+            "lsp-agent.active-doc" => {
+                if let Some(uri) = params.arguments.first().and_then(|v| v.as_str()) {
+                    self.agent.set_active_document(uri.to_string()).await;
+                }
+                Ok(None)
             }
+            _ => Ok(None),
         }
-        Ok(None)
     }
 }
 
