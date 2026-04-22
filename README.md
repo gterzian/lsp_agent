@@ -15,7 +15,7 @@ The agent can also see a list of values stored by apps. Apps can store and retri
 The app runs in a standard system webview through [wry](https://docs.rs/wry/latest/wry/), without additional sandboxing.
 The app has access to workspace documents, inference, and the shared key-value store by way of custom protocols.
 
-The main use case is having the agent write an app that does sub inference on data with prompt injection potential.
+The main use case is having the agent write an app that does sub inference on untrusted data.
 
 ## Requirements
 
