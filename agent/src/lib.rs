@@ -9,13 +9,14 @@ pub use document::{
 use automerge_repo::{ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
 use autosurgeon::{hydrate, reconcile};
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
 use tokio::runtime::Handle;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Duration, sleep};
-use traits::{InferenceClient, Web, WebAgent, WorkspaceAgent};
+use traits::{App, InferenceClient, WebAgent, WorkspaceAgent};
 use uuid::Uuid;
 
 fn find_repo_root(exe_path: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -34,6 +35,70 @@ const PEER1_PORT: u16 = 2341;
 const PEER2_PORT: u16 = 2342;
 const DEFAULT_TOOL_MAX_ITERATIONS: usize = 3;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppRuntime {
+    Web,
+    Makepad,
+}
+
+impl AppRuntime {
+    pub fn from_env() -> Self {
+        match std::env::var("LSP_AGENT_APP_RUNTIME") {
+            Ok(value) if value.eq_ignore_ascii_case("makepad") => Self::Makepad,
+            Ok(value) if value.eq_ignore_ascii_case("web") => Self::Web,
+            Ok(value) => {
+                eprintln!(
+                    "[LSP Agent] Unknown app runtime '{}', falling back to 'web'.",
+                    value
+                );
+                Self::Web
+            }
+            Err(_) => Self::Web,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Web => "web",
+            Self::Makepad => "makepad",
+        }
+    }
+
+    fn host_label(self) -> &'static str {
+        match self {
+            Self::Web => "web host",
+            Self::Makepad => "makepad host",
+        }
+    }
+
+    fn candidate_binaries(self, project_root: &Path) -> Vec<PathBuf> {
+        let mut candidates = Vec::new();
+
+        if let Ok(override_path) = std::env::var("LSP_AGENT_APP_BINARY") {
+            candidates.push(PathBuf::from(override_path));
+        }
+
+        match self {
+            Self::Web => {
+                if let Ok(override_path) = std::env::var("LSP_AGENT_WEB_BINARY") {
+                    candidates.push(PathBuf::from(override_path));
+                }
+                candidates.push(project_root.join("target/debug/web"));
+                candidates.push(project_root.join("web/target/debug/web"));
+            }
+            Self::Makepad => {
+                if let Ok(override_path) = std::env::var("LSP_AGENT_MAKEPAD_BINARY") {
+                    candidates.push(PathBuf::from(override_path));
+                }
+                candidates.push(project_root.join("target/debug/makepad-host"));
+                candidates.push(project_root.join("bins/makepad-host/target/debug/makepad-host"));
+            }
+        }
+
+        candidates
+    }
+}
+
 #[derive(Deserialize, Debug)]
 struct ToolResponse {
     action: String,
@@ -41,9 +106,12 @@ struct ToolResponse {
     app: Option<String>,
 }
 
-pub fn start_infra(client: Arc<dyn InferenceClient>) -> Box<dyn WorkspaceAgent> {
-    let (doc_handle, task, chat_tx) = start_automerge_infrastructure(client);
-    let child = spawn_web_client();
+pub fn start_infra(
+    client: Arc<dyn InferenceClient>,
+    runtime: AppRuntime,
+) -> Box<dyn WorkspaceAgent> {
+    let (doc_handle, task, chat_tx) = start_automerge_infrastructure(client, runtime);
+    let child = spawn_app_client(runtime);
 
     Box::new(AutomergeAgent {
         doc_handle,
@@ -70,7 +138,7 @@ struct AutomergeAgent {
 ///
 /// This does not call any web APIs directly; it only writes `AgentResponse` entries
 /// that the web process will observe and handle.
-struct DocWebSink {
+struct DocAppSink {
     doc_handle: DocHandle,
 }
 
@@ -91,10 +159,10 @@ impl DocWebAgent {
 /// Starts the web backend loop in the web client process.
 ///
 /// This connects to the shared document, watches for `AgentResponse` entries,
-/// and forwards them to the provided `Web` implementation (which owns the UI/webview).
+/// and forwards them to the provided `App` implementation (which owns the UI host).
 /// It returns a `WebAgent` that writes requests into the shared document for the
 /// server process to handle.
-pub async fn start_web_backend(web: Arc<dyn Web>) -> (Box<dyn WebAgent>, mpsc::Receiver<()>) {
+pub async fn start_app_backend(app: Arc<dyn App>) -> (Box<dyn WebAgent>, mpsc::Receiver<()>) {
     let doc_handle = setup_web_doc().await;
     let agent = DocWebAgent::new(doc_handle.clone());
     let (exit_tx, exit_rx) = mpsc::channel(1);
@@ -106,7 +174,7 @@ pub async fn start_web_backend(web: Arc<dyn Web>) -> (Box<dyn WebAgent>, mpsc::R
                 break;
             }
 
-            if handle_web_doc_change(&doc_handle, web.as_ref()).await {
+            if handle_web_doc_change(&doc_handle, app.as_ref()).await {
                 let _ = exit_tx.send(()).await;
                 break;
             }
@@ -117,7 +185,7 @@ pub async fn start_web_backend(web: Arc<dyn Web>) -> (Box<dyn WebAgent>, mpsc::R
 }
 
 #[async_trait::async_trait]
-impl Web for DocWebSink {
+impl App for DocAppSink {
     async fn launch_app(&self, id: String, content: String) {
         self.doc_handle.with_doc_mut(|doc| {
             let mut agent: LspAgent = hydrate(doc).unwrap();
@@ -338,7 +406,7 @@ async fn wait_for_doc_id() -> DocumentId {
     doc_id_str.parse().expect("Failed to parse document ID")
 }
 
-async fn handle_web_doc_change(doc_handle: &DocHandle, web: &dyn Web) -> bool {
+async fn handle_web_doc_change(doc_handle: &DocHandle, app: &dyn App) -> bool {
     let (should_exit, should_handle_response) = doc_handle.with_doc(|doc| {
         let agent: LspAgent = hydrate(doc).unwrap();
         let handle = match agent.responses.first() {
@@ -356,7 +424,7 @@ async fn handle_web_doc_change(doc_handle: &DocHandle, web: &dyn Web) -> bool {
     if should_handle_response {
         let response_enum = take_response(doc_handle);
         if let Some(resp) = response_enum {
-            handle_web_response(web, resp).await;
+            handle_web_response(app, resp).await;
         }
     }
 
@@ -385,21 +453,21 @@ fn take_response(doc_handle: &DocHandle) -> Option<AgentResponse> {
     })
 }
 
-async fn handle_web_response(web: &dyn Web, resp: AgentResponse) {
+async fn handle_web_response(app: &dyn App, resp: AgentResponse) {
     match resp {
         AgentResponse::WebApp { id, content } => {
-            web.launch_app(id, content).await;
+            app.launch_app(id, content).await;
         }
         AgentResponse::Chat(_) => {
             debug_assert!(false, "Web backend should not consume chat responses");
         }
         AgentResponse::Inference { app_id, content } => {
-            web.handle_inference_response(app_id, content).await;
+            app.handle_inference_response(app_id, content).await;
         }
     }
 }
 
-fn spawn_web_client() -> Option<Child> {
+fn spawn_app_client(runtime: AppRuntime) -> Option<Child> {
     let exe_path = std::env::current_exe().expect("Failed to get current exe path");
     let project_root = find_repo_root(&exe_path).unwrap_or_else(|| {
         exe_path
@@ -411,32 +479,31 @@ fn spawn_web_client() -> Option<Child> {
             .to_path_buf()
     });
 
-    let mut candidates = Vec::new();
-    if let Ok(override_path) = std::env::var("LSP_AGENT_WEB_BINARY") {
-        candidates.push(std::path::PathBuf::from(override_path));
-    }
-    candidates.push(project_root.join("target/debug/web"));
-    candidates.push(project_root.join("web/target/debug/web"));
-
-    let web_binary = match candidates.into_iter().find(|path| path.exists()) {
+    let app_binary = match runtime
+        .candidate_binaries(&project_root)
+        .into_iter()
+        .find(|path| path.exists())
+    {
         Some(path) => path,
         None => {
             eprintln!(
-                "[LSP Agent] Web client binary not found. Rebuild the web crate or set LSP_AGENT_WEB_BINARY."
+                "[LSP Agent] {} binary not found. Rebuild the matching crate or set LSP_AGENT_APP_BINARY.",
+                runtime.host_label(),
             );
             return None;
         }
     };
 
-    let mut child = Command::new(&web_binary);
+    let mut child = Command::new(&app_binary);
     child.stdout(std::process::Stdio::null());
     child.stderr(std::process::Stdio::inherit());
     match child.spawn() {
         Ok(child) => Some(child),
         Err(err) => {
             eprintln!(
-                "[LSP Agent] Failed to spawn web client at {}: {:?}",
-                web_binary.display(),
+                "[LSP Agent] Failed to spawn {} at {}: {:?}",
+                runtime.host_label(),
+                app_binary.display(),
                 err
             );
             None
@@ -450,6 +517,7 @@ fn spawn_web_client() -> Option<Child> {
 /// and writes `AgentResponse` entries that the web client will handle.
 fn start_automerge_infrastructure(
     client: Arc<dyn InferenceClient>,
+    runtime: AppRuntime,
 ) -> (
     DocHandle,
     tokio::task::JoinHandle<()>,
@@ -483,7 +551,7 @@ fn start_automerge_infrastructure(
     });
 
     let main_task_doc_handle = doc_handle.clone();
-    let web_sink: Arc<dyn Web> = Arc::new(DocWebSink {
+    let app_sink: Arc<dyn App> = Arc::new(DocAppSink {
         doc_handle: doc_handle.clone(),
     });
     let main_task_repo_handle = repo_handle1.clone();
@@ -508,11 +576,11 @@ fn start_automerge_infrastructure(
                     }
 
                     if let Some(req) = pending_request {
-                        handle_inference_request(req, &main_task_client, active_model, web_sink.as_ref()).await;
+                        handle_inference_request(req, &main_task_client, active_model, app_sink.as_ref()).await;
                     }
                 }
                 Some(chat_req) = chat_rx.recv() => {
-                    handle_chat_request(chat_req, &main_task_doc_handle, &main_task_client, web_sink.as_ref()).await;
+                    handle_chat_request(chat_req, runtime, &main_task_doc_handle, &main_task_client, app_sink.as_ref()).await;
                 }
                 else => {
                     break;
@@ -558,12 +626,12 @@ async fn handle_inference_request(
     req: AgentRequest,
     client: &Arc<dyn InferenceClient>,
     active_model: Option<String>,
-    web_sink: &dyn Web,
+    app_sink: &dyn App,
 ) {
     match req {
         AgentRequest::Inference { content, app_id } => {
             let response_str = call_inference(client.as_ref(), content, active_model).await;
-            web_sink
+            app_sink
                 .handle_inference_response(app_id, response_str)
                 .await;
         }
@@ -607,9 +675,10 @@ fn spawn_peer_connections(repo_handle: RepoHandle) {
 
 async fn handle_chat_request(
     chat_req: ChatRequest,
+    runtime: AppRuntime,
     doc_handle: &DocHandle,
     client: &Arc<dyn InferenceClient>,
-    web_sink: &dyn Web,
+    app_sink: &dyn App,
 ) {
     let ChatRequest {
         content: latest_user,
@@ -645,7 +714,8 @@ async fn handle_chat_request(
         .unwrap_or(DEFAULT_TOOL_MAX_ITERATIONS);
 
     for _ in 0..max_iterations {
-        let request_text = prompts::build_web_request(
+        let request_text = prompts::build_app_request(
+            runtime.as_str(),
             &history,
             &current_prompt_user,
             apps_payload.as_deref(),
@@ -764,7 +834,7 @@ async fn handle_chat_request(
 
     if let Some(app) = launched_app_for_doc {
         let app_id = format!("app-{}", Uuid::new_v4());
-        web_sink.launch_app(app_id.clone(), app.clone()).await;
+        app_sink.launch_app(app_id.clone(), app.clone()).await;
     }
 
     if let Some(message) = response_message {
@@ -1074,7 +1144,7 @@ mod tests {
         }
 
         #[async_trait::async_trait]
-        impl Web for RecordingWeb {
+        impl App for RecordingWeb {
             async fn launch_app(&self, id: String, content: String) {
                 let mut l = self.launched.lock().await;
                 l.push((id, content));
@@ -1139,7 +1209,7 @@ mod tests {
         }
 
         #[async_trait::async_trait]
-        impl Web for RecordingWeb {
+        impl App for RecordingWeb {
             async fn launch_app(&self, _id: String, _content: String) {
                 // no-op for this test
             }
@@ -1199,7 +1269,7 @@ mod tests {
         }
 
         #[async_trait::async_trait]
-        impl Web for RecordingWeb {
+        impl App for RecordingWeb {
             async fn launch_app(&self, _id: String, _content: String) {}
             async fn handle_inference_response(&self, _app_id: String, _content: String) {}
         }
@@ -1287,7 +1357,7 @@ mod tests {
         }
 
         #[async_trait::async_trait]
-        impl Web for RecordingWeb2 {
+        impl App for RecordingWeb2 {
             async fn launch_app(&self, _id: String, _content: String) {}
             async fn handle_inference_response(&self, _app_id: String, _content: String) {}
         }

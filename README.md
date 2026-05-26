@@ -32,6 +32,10 @@ The main use case is having the agent write an app that does sub inference on da
 5. The model used, both as the main agent and for app inference, is the one you select in the chat(auto defaults to gpt-5-mini).
 6. See [below](#maybe-useful-test-cases) for prompt ideas.
 
+The VS Code extension launches the Rust LSP server, and the server launches the configured app host runtime. Use the `lspAgent.appRuntime` setting to choose between the default `web` host and the optional `makepad` host. Use `lspAgent.appHostBinary` if you want to point the server at a custom host binary path.
+
+For manual Makepad-host testing, point `LSP_AGENT_WEB_BINARY` at the compiled `makepad-host` binary before starting the server. The default Wry host remains the full HTML runtime; the Makepad host currently exposes the shared app state plus manual inference round-trips in a native UI.
+
 
 ## Repository Structure
 
@@ -43,6 +47,8 @@ The main use case is having the agent write an app that does sub inference on da
    - `shared_document`: Shared document types (Automerge schema)
 - `traits`: Shared public interfaces
 - `web`: Web client that renders HTML apps and handles custom protocols
+- `makepad`: Native Makepad host that consumes the shared app bridge
+- `bins/makepad-host`: Binary entrypoint for the Makepad host
 
 ## Process Architecture
 
@@ -51,6 +57,7 @@ This project runs as multiple processes with a shared Automerge document as the 
 - **VS Code extension (TypeScript)** spawns the Rust LSP server and forwards editor events.
 - **LSP server (Rust)** hosts the agent core, owns the inference client, and manages the shared document (including requests/responses and stored values).
 - **Web client (Rust + wry)** runs in a separate process, renders HTML apps, and uses custom `wry://` protocols to request inference, read documents, or access stored values. It never calls inference directly; it writes requests into the shared document and listens for responses.
+- **Makepad host (Rust + Makepad)** is an optional native host process that uses the same shared `App` bridge. It currently displays launched app source and lets you issue manual inference requests from a native window.
 
 Data flow is intentionally split across the process boundary to prevent the webview from directly invoking inference or accessing documents without going through the agent’s request/response flow.
 

@@ -2,6 +2,7 @@ use serde::Serialize;
 use shared_document::ConversationFragment;
 
 const WEB_ENVIRONMENT_SYSTEM_PROMPT: &str = include_str!("../web-environment.md");
+const MAKEPAD_ENVIRONMENT_SYSTEM_PROMPT: &str = include_str!("../makepad-environment.md");
 
 #[derive(Serialize)]
 struct HistoryItem {
@@ -10,7 +11,8 @@ struct HistoryItem {
 }
 
 #[derive(Serialize)]
-struct WebRequest<'a> {
+struct AppRequest<'a> {
+    runtime: &'a str,
     system: &'a str,
     history: Vec<HistoryItem>,
     latest_user: &'a str,
@@ -24,30 +26,57 @@ struct WebRequest<'a> {
     active_document: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     docs_note: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stored_values: Option<&'a [StoredValueInfo]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stored_values_note: Option<&'a str>,
 }
 
-pub fn build_web_request(
+pub fn build_app_request(
+    runtime: &str,
     history: &[ConversationFragment],
     latest_user: &str,
     apps: Option<&[String]>,
     docs: Option<&DocsInfo>,
+    stored_values: Option<&[StoredValueInfo]>,
 ) -> String {
-    let request = WebRequest {
-        system: WEB_ENVIRONMENT_SYSTEM_PROMPT.trim_end(),
-        history: render_history(history, apps.is_some(), docs.is_some()),
+    let request = AppRequest {
+        runtime,
+        system: system_prompt_for_runtime(runtime).trim_end(),
+        history: render_history(history, false, false),
         latest_user,
         apps,
-        apps_note: apps
-            .as_ref()
-            .map(|_| "The app list below is provided because you requested running apps."),
+        apps_note: apps.as_ref().map(|_| apps_note_for_runtime(runtime)),
         open_documents: docs.map(|info| info.open_documents.as_slice()),
         active_document: docs.and_then(|info| info.active_document.as_deref()),
         docs_note: docs
             .as_ref()
             .map(|_| "The document list below is provided because you requested open documents."),
+        stored_values,
+        stored_values_note: stored_values
+            .as_ref()
+            .map(|_| "The stored values list below is provided because you requested it."),
     };
 
     serde_json::to_string_pretty(&request).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn system_prompt_for_runtime(runtime: &str) -> &'static str {
+    match runtime {
+        "makepad" => MAKEPAD_ENVIRONMENT_SYSTEM_PROMPT,
+        _ => WEB_ENVIRONMENT_SYSTEM_PROMPT,
+    }
+}
+
+fn apps_note_for_runtime(runtime: &str) -> &'static str {
+    match runtime {
+        "makepad" => {
+            "The app list below is provided because you requested running apps. Each entry is the textual app definition currently shown in the persistent Makepad host."
+        }
+        _ => {
+            "The app list below is provided because you requested running apps. Each entry is a running web app HTML document."
+        }
+    }
 }
 
 fn render_history(
@@ -92,38 +121,57 @@ pub struct DocsInfo {
     pub active_document: Option<String>,
 }
 
+#[derive(Serialize, Clone)]
+pub struct StoredValueInfo {
+    pub key: String,
+    pub description: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_build_web_request_basic() {
+    fn test_build_app_request_web_basic() {
         use serde_json::Value;
         let history = vec![ConversationFragment::User("hello".to_string())];
-        let request = build_web_request(&history, "test prompt", None, None);
+        let request = build_app_request("web", &history, "test prompt", None, None, None);
         let parsed: Value = serde_json::from_str(&request).unwrap();
 
-        // Should contain the system prompt and latest_user
+        assert_eq!(parsed["runtime"].as_str().unwrap(), "web");
         assert!(parsed["system"]
             .as_str()
             .unwrap()
-            .contains("You are an expert web developer assistant"));
+            .contains("expert app developer assistant targeting the web runtime"));
         assert_eq!(parsed["latest_user"].as_str().unwrap(), "test prompt");
         assert!(parsed["history"].is_array());
 
-        // Optional fields should be absent
         assert!(parsed.get("apps").is_none());
         assert!(parsed.get("open_documents").is_none());
+        assert!(parsed.get("stored_values").is_none());
     }
 
     #[test]
-    fn test_build_web_request_with_apps() {
+    fn test_build_app_request_makepad_uses_makepad_prompt() {
+        use serde_json::Value;
+        let request = build_app_request("makepad", &[], "launch app", None, None, None);
+        let parsed: Value = serde_json::from_str(&request).unwrap();
+
+        assert_eq!(parsed["runtime"].as_str().unwrap(), "makepad");
+        assert!(parsed["system"]
+            .as_str()
+            .unwrap()
+            .contains("expert native UI assistant targeting the Makepad runtime"));
+    }
+
+    #[test]
+    fn test_build_app_request_with_apps() {
         use serde_json::Value;
         let history = vec![ConversationFragment::Assistant(
             "previous response".to_string(),
         )];
         let apps = vec!["app1".to_string(), "app2".to_string()];
-        let request = build_web_request(&history, "launch app", Some(&apps), None);
+        let request = build_app_request("web", &history, "launch app", Some(&apps), None, None);
         let parsed: Value = serde_json::from_str(&request).unwrap();
 
         let apps_val = parsed
@@ -140,14 +188,13 @@ mod tests {
     }
 
     #[test]
-    fn test_build_web_request_with_docs() {
+    fn test_build_app_request_with_docs() {
         use serde_json::Value;
-        let history = vec![];
         let docs = DocsInfo {
             open_documents: vec!["file1.rs".to_string(), "file2.rs".to_string()],
             active_document: Some("file1.rs".to_string()),
         };
-        let request = build_web_request(&history, "summarize", None, Some(&docs));
+        let request = build_app_request("web", &[], "summarize", None, Some(&docs), None);
         let parsed: Value = serde_json::from_str(&request).unwrap();
 
         let docs_arr = parsed
@@ -166,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_web_request_with_all_options() {
+    fn test_build_app_request_with_all_options() {
         use serde_json::Value;
         let history = vec![
             ConversationFragment::User("user question".to_string()),
@@ -177,7 +224,18 @@ mod tests {
             open_documents: vec!["main.rs".to_string()],
             active_document: Some("main.rs".to_string()),
         };
-        let request = build_web_request(&history, "help me", Some(&apps), Some(&docs));
+        let stored_values = vec![StoredValueInfo {
+            key: "todo-state".to_string(),
+            description: "Serialized todo app state".to_string(),
+        }];
+        let request = build_app_request(
+            "web",
+            &history,
+            "help me",
+            Some(&apps),
+            Some(&docs),
+            Some(&stored_values),
+        );
         let parsed: Value = serde_json::from_str(&request).unwrap();
 
         let hist = parsed.get("history").and_then(|v| v.as_array()).unwrap();
@@ -186,8 +244,13 @@ mod tests {
             .any(|i| i["content"].as_str().unwrap() == "user question"));
         assert_eq!(parsed["apps"][0].as_str().unwrap(), "todo app");
         assert_eq!(parsed["open_documents"][0].as_str().unwrap(), "main.rs");
+        assert_eq!(
+            parsed["stored_values"][0]["key"].as_str().unwrap(),
+            "todo-state"
+        );
         assert!(parsed.get("apps_note").is_some());
         assert!(parsed.get("docs_note").is_some());
+        assert!(parsed.get("stored_values_note").is_some());
     }
 
     #[test]
@@ -240,5 +303,17 @@ mod tests {
         let json = serde_json::to_string(&docs).unwrap();
         assert!(json.contains("a.rs"));
         assert!(json.contains("b.rs"));
+    }
+
+    #[test]
+    fn test_stored_value_info_serialization() {
+        let stored_value = StoredValueInfo {
+            key: "scoreboard".to_string(),
+            description: "Game scoreboard state".to_string(),
+        };
+
+        let json = serde_json::to_string(&stored_value).unwrap();
+        assert!(json.contains("scoreboard"));
+        assert!(json.contains("Game scoreboard state"));
     }
 }

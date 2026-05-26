@@ -52,6 +52,22 @@ cargo test
 cargo build
 cd ..
 
+echo "=== Testing and Building Makepad App Host ==="
+cd makepad
+cargo fmt
+cargo clippy -- -D warnings
+cargo test
+cargo build
+cd ..
+
+echo "=== Testing and Building Makepad Host Binary ==="
+cd bins/makepad-host
+cargo fmt
+cargo clippy -- -D warnings
+cargo test
+cargo build
+cd ../..
+
 echo "=== Building TypeScript Client ==="
 cd vs_code_lsp/client
 # Only run install if node_modules doesn't exist to save time

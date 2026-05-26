@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { workspace, ExtensionContext, window, lm, LanguageModelChatMessage, CancellationTokenSource, chat } from 'vscode';
+import { workspace, ExtensionContext, window, lm, LanguageModelChatMessage, CancellationTokenSource, chat, OutputChannel } from 'vscode';
 import {
   LanguageClient,
   LanguageClientOptions,
@@ -10,6 +10,28 @@ import {
 import * as fs from 'fs';
 
 let client: LanguageClient;
+type AppRuntime = 'web' | 'makepad';
+
+function getConfiguredRuntime(): AppRuntime {
+  const configured = workspace.getConfiguration('lspAgent').get<string>('appRuntime', 'web');
+  return configured === 'makepad' ? 'makepad' : 'web';
+}
+
+function getServerEnvironment(outputChannel: OutputChannel): NodeJS.ProcessEnv {
+  const runtime = getConfiguredRuntime();
+  const hostBinary = workspace.getConfiguration('lspAgent').get<string>('appHostBinary', '').trim();
+
+  outputChannel.appendLine(`[LSP Agent] Selected app runtime: ${runtime}`);
+  if (hostBinary.length > 0) {
+    outputChannel.appendLine(`[LSP Agent] Using host binary override: ${hostBinary}`);
+  }
+
+  return {
+    ...process.env,
+    LSP_AGENT_APP_RUNTIME: runtime,
+    ...(hostBinary.length > 0 ? { LSP_AGENT_APP_BINARY: hostBinary } : {})
+  };
+}
 
 export async function activate(context: ExtensionContext) {
   const serverPathCandidates = [
@@ -30,12 +52,21 @@ export async function activate(context: ExtensionContext) {
   
   // The server is implemented in node
   const serverExecutable = serverPath;
+  const serverEnv = getServerEnvironment(outputChannel);
   
   // If the extension is launched in debug mode then the debug server options are used
   // Otherwise the run options are used
   const serverOptions: ServerOptions = {
-    run: { command: serverExecutable, transport: TransportKind.stdio },
-    debug: { command: serverExecutable, transport: TransportKind.stdio }
+    run: {
+      command: serverExecutable,
+      transport: TransportKind.stdio,
+      options: { env: serverEnv }
+    },
+    debug: {
+      command: serverExecutable,
+      transport: TransportKind.stdio,
+      options: { env: serverEnv }
+    }
   };
 
   // Options to control the language client
@@ -182,6 +213,12 @@ export async function activate(context: ExtensionContext) {
   });
 
   context.subscriptions.push(chatParticipant);
+
+  context.subscriptions.push(workspace.onDidChangeConfiguration(event => {
+    if (event.affectsConfiguration('lspAgent.appRuntime') || event.affectsConfiguration('lspAgent.appHostBinary')) {
+      outputChannel.appendLine('[LSP Agent] App runtime configuration changed. Reload the window to restart the server with the new runtime.');
+    }
+  }));
 
   if (serverAvailable) {
     await ensureClient();

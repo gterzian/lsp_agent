@@ -2,6 +2,7 @@ use crate::ConversationFragment;
 use serde::Serialize;
 
 const WEB_ENVIRONMENT_SYSTEM_PROMPT: &str = include_str!("../prompts/web-environment.md");
+const MAKEPAD_ENVIRONMENT_SYSTEM_PROMPT: &str = include_str!("../prompts/makepad-environment.md");
 
 #[derive(Serialize)]
 struct HistoryItem {
@@ -10,7 +11,8 @@ struct HistoryItem {
 }
 
 #[derive(Serialize)]
-struct WebRequest<'a> {
+struct AppRequest<'a> {
+    runtime: &'a str,
     system: &'a str,
     history: Vec<HistoryItem>,
     latest_user: &'a str,
@@ -30,21 +32,21 @@ struct WebRequest<'a> {
     stored_values_note: Option<&'a str>,
 }
 
-pub fn build_web_request(
+pub fn build_app_request(
+    runtime: &str,
     history: &[ConversationFragment],
     latest_user: &str,
     apps: Option<&[String]>,
     docs: Option<&DocsInfo>,
     stored_values: Option<&[StoredValueInfo]>,
 ) -> String {
-    let request = WebRequest {
-        system: WEB_ENVIRONMENT_SYSTEM_PROMPT.trim_end(),
+    let request = AppRequest {
+        runtime,
+        system: system_prompt_for_runtime(runtime).trim_end(),
         history: render_history(history, false, false),
         latest_user,
         apps,
-        apps_note: apps
-            .as_ref()
-            .map(|_| "The app list below is provided because you requested running apps."),
+        apps_note: apps.as_ref().map(|_| apps_note_for_runtime(runtime)),
         open_documents: docs.map(|info| info.open_documents.as_slice()),
         active_document: docs.and_then(|info| info.active_document.as_deref()),
         docs_note: docs
@@ -57,6 +59,24 @@ pub fn build_web_request(
     };
 
     serde_json::to_string_pretty(&request).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn system_prompt_for_runtime(runtime: &str) -> &'static str {
+    match runtime {
+        "makepad" => MAKEPAD_ENVIRONMENT_SYSTEM_PROMPT,
+        _ => WEB_ENVIRONMENT_SYSTEM_PROMPT,
+    }
+}
+
+fn apps_note_for_runtime(runtime: &str) -> &'static str {
+    match runtime {
+        "makepad" => {
+            "The app list below is provided because you requested running apps. Each entry is the textual app definition currently shown in the persistent Makepad host."
+        }
+        _ => {
+            "The app list below is provided because you requested running apps. Each entry is a running web app HTML document."
+        }
+    }
 }
 
 fn render_history(

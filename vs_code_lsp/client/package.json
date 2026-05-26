@@ -29,6 +29,22 @@
           ],
           "default": "off",
           "description": "Traces the communication between VS Code and the language server."
+        },
+        "lspAgent.appRuntime": {
+          "scope": "window",
+          "type": "string",
+          "enum": [
+            "web",
+            "makepad"
+          ],
+          "default": "web",
+          "description": "Chooses which app host runtime the server launches on startup. Changes take effect after reloading the window."
+        },
+        "lspAgent.appHostBinary": {
+          "scope": "window",
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to a custom app host binary. Changes take effect after reloading the window."
         }
       }
     },

@@ -1,4 +1,4 @@
-use agent::start_web_backend;
+use agent::start_app_backend;
 use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::window::{Window, WindowId};
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, Mutex};
-use traits::{Web, WebAgent};
+use traits::{App, WebAgent};
 use wry::{http, RequestAsyncResponder, WebView};
 
 use serde::Deserialize;
@@ -53,12 +53,12 @@ enum ApiRequest {
     },
 }
 
-struct WebRuntime {
+struct WryAppHost {
     proxy: tao::event_loop::EventLoopProxy<AgentEvent>,
     pending_inference_requests: Mutex<HashMap<String, VecDeque<RequestAsyncResponder>>>,
 }
 
-impl WebRuntime {
+impl WryAppHost {
     fn new(proxy: tao::event_loop::EventLoopProxy<AgentEvent>) -> Self {
         Self {
             proxy,
@@ -77,7 +77,7 @@ impl WebRuntime {
 }
 
 #[async_trait]
-impl Web for WebRuntime {
+impl App for WryAppHost {
     async fn launch_app(&self, id: String, content: String) {
         let _ = self.proxy.send_event(AgentEvent::WebApp { id, content });
     }
@@ -122,8 +122,8 @@ async fn run_backend(
 ) {
     println!("Backend thread started...");
 
-    let web_runtime = Arc::new(WebRuntime::new(proxy));
-    let (agent, mut exit_rx) = start_web_backend(web_runtime.clone()).await;
+    let app_host = Arc::new(WryAppHost::new(proxy));
+    let (agent, mut exit_rx) = start_app_backend(app_host.clone()).await;
 
     loop {
         tokio::select! {
@@ -131,7 +131,7 @@ async fn run_backend(
                     handle_backend_command(agent.as_ref(), cmd).await;
             }
             Some(req) = api_rx.recv() => {
-                    handle_api_request(agent.as_ref(), req, web_runtime.as_ref()).await;
+                    handle_api_request(agent.as_ref(), req, app_host.as_ref()).await;
             }
             _ = exit_rx.recv() => {
                 break;
@@ -145,7 +145,7 @@ async fn handle_backend_command(agent: &dyn WebAgent, cmd: BackendCommand) {
     agent.close_app(app_id).await;
 }
 
-async fn handle_api_request(agent: &dyn WebAgent, req: ApiRequest, web_runtime: &WebRuntime) {
+async fn handle_api_request(agent: &dyn WebAgent, req: ApiRequest, app_host: &WryAppHost) {
     match req {
         ApiRequest::Inference {
             content,
@@ -154,7 +154,7 @@ async fn handle_api_request(agent: &dyn WebAgent, req: ApiRequest, web_runtime: 
         } => {
             let app_id_for_queue = app_id.clone();
             agent.app_inference_request(content, app_id).await;
-            web_runtime
+            app_host
                 .enqueue_inference_request(app_id_for_queue, responder)
                 .await;
         }
@@ -174,7 +174,7 @@ async fn handle_api_request(agent: &dyn WebAgent, req: ApiRequest, web_runtime: 
             responder,
         } => {
             agent.store_value(key.clone(), value, description).await;
-            web_runtime.notify_storage_update(key).await;
+            app_host.notify_storage_update(key).await;
             responder.respond(
                 http::Response::builder()
                     .header("Access-Control-Allow-Origin", "*")

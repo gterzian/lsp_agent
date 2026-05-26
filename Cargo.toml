@@ -5,6 +5,8 @@ members = [
     "traits",
     "vs_code_lsp/server",
     "web",
+    "makepad",
+    "bins/makepad-host",
     "agent/prompts",
     "agent/shared_document",
 ]
@@ -25,6 +27,7 @@ tokio = { version = "1", features = ["full"] }
 tower-lsp = "0.20"
 uuid = { version = "1.11.0", features = ["serde", "v4"] }
 wry = "0.54.1"
+makepad-widgets = "1.0.0"
 
 agent = { path = "agent" }
 traits = { path = "traits" }

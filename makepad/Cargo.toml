@@ -1,0 +1,11 @@
+[package]
+name = "makepad-app-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agent = { workspace = true }
+async-trait = { workspace = true }
+makepad-widgets = { workspace = true }
+tokio = { workspace = true }
+traits = { workspace = true }

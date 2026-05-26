@@ -30,9 +30,9 @@ pub trait WebAgent: Send + Sync {
     async fn read_value(&self, key: String) -> Option<String>;
 }
 
-/// Web UI bridge used to apply responses from the shared document to the webview.
+/// App host bridge used to apply responses from the shared document to the UI.
 #[async_trait]
-pub trait Web: Send + Sync {
+pub trait App: Send + Sync {
     async fn launch_app(&self, id: String, content: String);
     async fn handle_inference_response(&self, app_id: String, content: String);
 }

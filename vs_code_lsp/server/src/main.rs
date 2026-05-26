@@ -1,4 +1,4 @@
-use agent::start_infra;
+use agent::{AppRuntime, start_infra};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result as LspResult;
@@ -62,6 +62,7 @@ impl InferenceClient for LspAgentClient {
 struct Backend {
     client: Client,
     agent: Box<dyn WorkspaceAgent>,
+    runtime: AppRuntime,
 }
 
 #[tower_lsp::async_trait]
@@ -90,7 +91,13 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "Server initialized!")
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "Server initialized with app runtime '{}'.",
+                    self.runtime.as_str()
+                ),
+            )
             .await;
     }
 
@@ -155,11 +162,16 @@ async fn main() {
     let stdout = tokio::io::stdout();
 
     let (service, socket) = LspService::new(|client| {
+        let runtime = AppRuntime::from_env();
         let agent_client = Arc::new(LspAgentClient {
             client: client.clone(),
         });
-        let agent = start_infra(agent_client);
-        Backend { client, agent }
+        let agent = start_infra(agent_client, runtime);
+        Backend {
+            client,
+            agent,
+            runtime,
+        }
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }
