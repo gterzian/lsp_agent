@@ -13,8 +13,8 @@ let client: LanguageClient;
 type AppRuntime = 'web' | 'makepad';
 
 function getConfiguredRuntime(): AppRuntime {
-  const configured = workspace.getConfiguration('lspAgent').get<string>('appRuntime', 'web');
-  return configured === 'makepad' ? 'makepad' : 'web';
+  const configured = workspace.getConfiguration('lspAgent').get<string>('appRuntime', 'makepad');
+  return configured === 'web' ? 'web' : 'makepad';
 }
 
 function getServerEnvironment(outputChannel: OutputChannel): NodeJS.ProcessEnv {
@@ -25,9 +25,12 @@ function getServerEnvironment(outputChannel: OutputChannel): NodeJS.ProcessEnv {
   if (hostBinary.length > 0) {
     outputChannel.appendLine(`[LSP Agent] Using host binary override: ${hostBinary}`);
   }
+  outputChannel.appendLine('[LSP Agent] Enabling Rust backtraces for server and host processes.');
 
   return {
     ...process.env,
+    RUST_BACKTRACE: process.env.RUST_BACKTRACE?.trim() || '1',
+    RUST_LIB_BACKTRACE: process.env.RUST_LIB_BACKTRACE?.trim() || '1',
     LSP_AGENT_APP_RUNTIME: runtime,
     ...(hostBinary.length > 0 ? { LSP_AGENT_APP_BINARY: hostBinary } : {})
   };

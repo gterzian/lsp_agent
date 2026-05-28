@@ -27,7 +27,7 @@ tokio = { version = "1", features = ["full"] }
 tower-lsp = "0.20"
 uuid = { version = "1.11.0", features = ["serde", "v4"] }
 wry = "0.54.1"
-makepad-widgets = "1.0.0"
+makepad-widgets = { git = "https://github.com/makepad/makepad", rev = "12dcfc1e7700d99c98801dfab06b0d29c337bf3a" }
 
 agent = { path = "agent" }
 traits = { path = "traits" }

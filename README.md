@@ -32,9 +32,9 @@ The main use case is having the agent write an app that does sub inference on da
 5. The model used, both as the main agent and for app inference, is the one you select in the chat(auto defaults to gpt-5-mini).
 6. See [below](#maybe-useful-test-cases) for prompt ideas.
 
-The VS Code extension launches the Rust LSP server, and the server launches the configured app host runtime. Use the `lspAgent.appRuntime` setting to choose between the default `web` host and the optional `makepad` host. Use `lspAgent.appHostBinary` if you want to point the server at a custom host binary path.
+The VS Code extension launches the Rust LSP server, and the server launches the configured app host runtime. Use the `lspAgent.appRuntime` setting to choose between the default `makepad` host and the optional `web` host. Use `lspAgent.appHostBinary` if you want to point the server at a custom host binary path.
 
-For manual Makepad-host testing, point `LSP_AGENT_WEB_BINARY` at the compiled `makepad-host` binary before starting the server. The default Wry host remains the full HTML runtime; the Makepad host currently exposes the shared app state plus manual inference round-trips in a native UI.
+For manual host-binary testing, set `LSP_AGENT_APP_BINARY` to the compiled runtime binary before starting the server. You can also use runtime-specific overrides (`LSP_AGENT_MAKEPAD_BINARY` / `LSP_AGENT_WEB_BINARY`). The default host is Makepad, while the Wry host remains the full HTML runtime.
 
 
 ## Repository Structure

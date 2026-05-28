@@ -17,6 +17,10 @@ struct AppRequest<'a> {
     history: Vec<HistoryItem>,
     latest_user: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    standard_apps: Option<&'a [StandardAppInfo]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    standard_apps_note: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     apps: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     apps_note: Option<&'a str>,
@@ -39,12 +43,17 @@ pub fn build_app_request(
     apps: Option<&[String]>,
     docs: Option<&DocsInfo>,
     stored_values: Option<&[StoredValueInfo]>,
+    standard_apps: Option<&[StandardAppInfo]>,
 ) -> String {
     let request = AppRequest {
         runtime,
         system: system_prompt_for_runtime(runtime).trim_end(),
         history: render_history(history, false, false),
         latest_user,
+        standard_apps,
+        standard_apps_note: standard_apps
+            .as_ref()
+            .map(|_| standard_apps_note_for_runtime(runtime)),
         apps,
         apps_note: apps.as_ref().map(|_| apps_note_for_runtime(runtime)),
         open_documents: docs.map(|info| info.open_documents.as_slice()),
@@ -71,10 +80,21 @@ fn system_prompt_for_runtime(runtime: &str) -> &'static str {
 fn apps_note_for_runtime(runtime: &str) -> &'static str {
     match runtime {
         "makepad" => {
-            "The app list below is provided because you requested running apps. Each entry is the textual app definition currently shown in the persistent Makepad host."
+            "The app list below is provided because you requested running apps. Each entry is the raw Splash body currently rendered in the persistent Makepad host."
         }
         _ => {
             "The app list below is provided because you requested running apps. Each entry is a running web app HTML document."
+        }
+    }
+}
+
+fn standard_apps_note_for_runtime(runtime: &str) -> &'static str {
+    match runtime {
+        "makepad" => {
+            "The standard_apps list below contains named, well-written built-in Makepad apps. Prefer launch_standard_app when one clearly fits the user's request."
+        }
+        _ => {
+            "The standard_apps list below contains named built-in apps available for this runtime."
         }
     }
 }
@@ -124,5 +144,11 @@ pub struct DocsInfo {
 #[derive(Serialize, Clone)]
 pub struct StoredValueInfo {
     pub key: String,
+    pub description: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct StandardAppInfo {
+    pub id: String,
     pub description: String,
 }

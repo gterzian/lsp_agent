@@ -37,7 +37,7 @@
             "web",
             "makepad"
           ],
-          "default": "web",
+          "default": "makepad",
           "description": "Chooses which app host runtime the server launches on startup. Changes take effect after reloading the window."
         },
         "lspAgent.appHostBinary": {

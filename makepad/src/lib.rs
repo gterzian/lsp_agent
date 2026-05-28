@@ -1,28 +1,19 @@
+pub mod agent_splash;
 pub mod app;
-pub mod app_window;
 pub mod host;
 pub mod state;
 
 use std::sync::Arc;
 
-use makepad_widgets::{AppMain, Cx, CxOsApi, Event, LiveNew, SignalToUI};
+use makepad_widgets::SignalToUI;
 use tokio::sync::mpsc;
 
-use crate::app::MakepadRootApp;
 use crate::host::MakepadAppHost;
 use crate::state::{HostCommand, COMMAND_TX};
 
-pub fn live_design(cx: &mut Cx) {
-    makepad_widgets::live_design(cx);
-    crate::app_window::live_design(cx);
-    crate::app::live_design(cx);
-}
-
-makepad_widgets::app_main!(MakepadRootApp);
-
 pub fn run() {
     start_backend_thread();
-    app_main();
+    crate::app::app_main();
 }
 
 fn start_backend_thread() {

@@ -71,7 +71,7 @@ fn system_prompt_for_runtime(runtime: &str) -> &'static str {
 fn apps_note_for_runtime(runtime: &str) -> &'static str {
     match runtime {
         "makepad" => {
-            "The app list below is provided because you requested running apps. Each entry is the textual app definition currently shown in the persistent Makepad host."
+            "The app list below is provided because you requested running apps. Each entry is the raw Splash body currently rendered in the persistent Makepad host."
         }
         _ => {
             "The app list below is provided because you requested running apps. Each entry is a running web app HTML document."
@@ -315,5 +315,20 @@ mod tests {
         let json = serde_json::to_string(&stored_value).unwrap();
         assert!(json.contains("scoreboard"));
         assert!(json.contains("Game scoreboard state"));
+    }
+
+    #[test]
+    fn test_makepad_prompt_includes_working_splash_rules() {
+        assert!(MAKEPAD_ENVIRONMENT_SYSTEM_PROMPT
+            .contains("Do NOT nest `let` state or `fn` helpers inside the root"));
+        assert!(MAKEPAD_ENVIRONMENT_SYSTEM_PROMPT
+            .contains("Do NOT use `on_render` in embedded Splash for this host"));
+        assert!(MAKEPAD_ENVIRONMENT_SYSTEM_PROMPT
+            .contains("The root container must be the final top-level expression in `app`"));
+        assert!(MAKEPAD_ENVIRONMENT_SYSTEM_PROMPT.contains(
+            "`TextInput` widgets must use an explicit fixed numeric height such as `34`"
+        ));
+        assert!(MAKEPAD_ENVIRONMENT_SYSTEM_PROMPT.contains("let todos = ["));
+        assert!(MAKEPAD_ENVIRONMENT_SYSTEM_PROMPT.contains("sync_rows()"));
     }
 }

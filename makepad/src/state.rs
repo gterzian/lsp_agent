@@ -35,13 +35,21 @@ impl AppState {
 }
 
 pub struct HostState {
+    pub revision: u64,
     pub pending_launches: Vec<PendingLaunch>,
     pub app_order: Vec<String>,
     pub apps: HashMap<String, AppState>,
 }
 
+impl HostState {
+    pub fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+}
+
 pub static HOST_STATE: LazyLock<RwLock<HostState>> = LazyLock::new(|| {
     RwLock::new(HostState {
+        revision: 0,
         pending_launches: Vec::new(),
         app_order: Vec::new(),
         apps: HashMap::new(),
