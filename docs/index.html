@@ -26,31 +26,38 @@
         list-style: none;
         margin: 0;
         padding: 0;
-        display: flex;
-        flex-direction: column;
-        gap: 0.6rem;
       }
       #message-list li {
         background: #ffffff;
         border: 1px solid #e4e2ec;
         border-radius: 0.85rem;
         padding: 0.7rem 0.9rem;
+        margin-bottom: 0.6rem;
       }
-      #message-list li .meta {
-        display: flex;
-        justify-content: space-between;
-        gap: 0.6rem;
+      /* Block layout (no flexbox) so each field sits on its own line. */
+      #message-list li .time {
+        display: block;
         font-size: 0.72rem;
         letter-spacing: 0.04em;
         text-transform: uppercase;
         color: #7a7a92;
-        margin-bottom: 0.25rem;
+      }
+      #message-list li .origin {
+        display: block;
+        font-size: 0.72rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: #7a7a92;
+        margin-bottom: 0.4rem;
       }
       #message-list li .data {
+        display: block;
         font-size: 0.95rem;
         color: #1a1a2e;
         word-break: break-word;
         white-space: pre-wrap;
+        border-top: 1px solid #eee;
+        padding-top: 0.4rem;
       }
       #empty-note {
         text-align: center;
@@ -76,16 +83,16 @@
 
       function renderMessage(data, origin) {
         var li = document.createElement("li");
-        var meta = document.createElement("div");
-        meta.className = "meta";
-        var time = document.createElement("span");
-        time.textContent = new Date().toLocaleTimeString();
-        var originEl = document.createElement("span");
-        originEl.textContent = "origin: " + origin;
-        meta.appendChild(time);
-        meta.appendChild(originEl);
 
-        var dataEl = document.createElement("div");
+        var time = document.createElement("span");
+        time.className = "time";
+        time.textContent = new Date().toLocaleTimeString();
+
+        var originEl = document.createElement("span");
+        originEl.className = "origin";
+        originEl.textContent = "from " + origin;
+
+        var dataEl = document.createElement("span");
         dataEl.className = "data";
         if (typeof data === "string") {
           dataEl.textContent = data;
@@ -97,7 +104,8 @@
           }
         }
 
-        li.appendChild(meta);
+        li.appendChild(time);
+        li.appendChild(originEl);
         li.appendChild(dataEl);
         listEl.appendChild(li);
       }
@@ -112,4 +120,3 @@
     </script>
   </body>
 </html>
-
